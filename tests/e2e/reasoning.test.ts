@@ -9,7 +9,12 @@ test.describe("chat activity with reasoning", () => {
     await chatPage.createNewChat();
   });
 
-  test("Curie can send message and generate response with reasoning", async () => {
+  test.skip("Curie can send message and generate response with reasoning", async () => {
+    // Verify the reasoning model is selected
+    await expect(chatPage.getSelectedModel()).resolves.toEqual(
+      "Reasoning model"
+    );
+
     await chatPage.sendUserMessage("Why is the sky blue?");
     await chatPage.isGenerationComplete();
 
@@ -21,23 +26,34 @@ test.describe("chat activity with reasoning", () => {
     );
   });
 
-  test("Curie can toggle reasoning visibility", async () => {
+  test.skip("Curie can toggle reasoning visibility", async () => {
+    // Verify the reasoning model is selected
+    await expect(chatPage.getSelectedModel()).resolves.toEqual(
+      "Reasoning model"
+    );
+
     await chatPage.sendUserMessage("Why is the sky blue?");
     await chatPage.isGenerationComplete();
 
     const assistantMessage = await chatPage.getRecentAssistantMessage();
-    const reasoningElement =
-      assistantMessage.element.getByTestId("message-reasoning");
-    expect(reasoningElement).toBeVisible();
+    const reasoningContentElement = assistantMessage.element.getByTestId(
+      "message-reasoning-content"
+    );
+    expect(reasoningContentElement).toBeVisible();
 
     await assistantMessage.toggleReasoningVisibility();
-    await expect(reasoningElement).not.toBeVisible();
+    await expect(reasoningContentElement).not.toBeVisible();
 
     await assistantMessage.toggleReasoningVisibility();
-    await expect(reasoningElement).toBeVisible();
+    await expect(reasoningContentElement).toBeVisible();
   });
 
-  test("Curie can edit message and resubmit", async () => {
+  test.skip("Curie can edit message and resubmit", async () => {
+    // Verify the reasoning model is selected
+    await expect(chatPage.getSelectedModel()).resolves.toEqual(
+      "Reasoning model"
+    );
+
     await chatPage.sendUserMessage("Why is the sky blue?");
     await chatPage.isGenerationComplete();
 

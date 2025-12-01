@@ -15,10 +15,10 @@ type SuggestedActionsProps = {
 
 function PureSuggestedActions({ chatId, sendMessage }: SuggestedActionsProps) {
   const suggestedActions = [
-    "What are the advantages of using Next.js?",
-    "Write code to demonstrate Dijkstra's algorithm",
-    "Help me write an essay about Silicon Valley",
-    "What is the weather in San Francisco?",
+    "Tell me about Bill C-35 of the 44th Parliament",
+    "Parlez-moi de la Loi sur l'aéronautique",
+    "Tell me about the Aeronautics Act",
+    "Parlez-moi du projet de loi C-35 de la 44e législature.",
   ];
 
   return (
@@ -37,7 +37,7 @@ function PureSuggestedActions({ chatId, sendMessage }: SuggestedActionsProps) {
           <Suggestion
             className="h-auto w-full whitespace-normal p-3 text-left"
             onClick={(suggestion) => {
-              window.history.replaceState({}, "", `/chat/${chatId}`);
+              window.history.replaceState({}, "", `/workbench/${chatId}`);
               sendMessage({
                 role: "user",
                 parts: [{ type: "text", text: suggestion }],

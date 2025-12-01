@@ -105,6 +105,7 @@ export function convertToUIMessages(messages: DBMessage[]): ChatMessage[] {
     metadata: {
       createdAt: formatISO(message.createdAt),
     },
+    context: message.context,
   }));
 }
 

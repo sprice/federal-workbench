@@ -1,10 +1,15 @@
 "use client";
 
-import { ChevronUp } from "lucide-react";
+import { ChevronUp, Home } from "lucide-react";
+// @NOTE: useRouter disabled - auth routes are currently disabled
 import Image from "next/image";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+// @NOTE: useRouter disabled - auth routes are currently disabled
+// import { useRouter } from "next/navigation";
 import type { User } from "next-auth";
-import { signOut, useSession } from "next-auth/react";
+// @NOTE: signOut disabled - auth routes are currently disabled
+// import { signOut, useSession } from "next-auth/react";
+import { useSession } from "next-auth/react";
 import { useTheme } from "next-themes";
 import {
   DropdownMenu,
@@ -20,10 +25,12 @@ import {
 } from "@/components/ui/sidebar";
 import { guestRegex } from "@/lib/constants";
 import { LoaderIcon } from "./icons";
-import { toast } from "./toast";
+// @NOTE: toast disabled - auth routes are currently disabled
+// import { toast } from "./toast";
 
 export function SidebarUserNav({ user }: { user: User }) {
-  const router = useRouter();
+  // @NOTE: router disabled - auth routes are currently disabled
+  // const router = useRouter();
   const { data, status } = useSession();
   const { setTheme, resolvedTheme } = useTheme();
 
@@ -70,6 +77,13 @@ export function SidebarUserNav({ user }: { user: User }) {
             data-testid="user-nav-menu"
             side="top"
           >
+            <DropdownMenuItem asChild className="cursor-pointer">
+              <Link href="/">
+                <Home className="mr-2 size-4" />
+                Home
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               className="cursor-pointer"
               data-testid="user-nav-item-theme"
@@ -79,6 +93,7 @@ export function SidebarUserNav({ user }: { user: User }) {
             >
               {`Toggle ${resolvedTheme === "light" ? "dark" : "light"} mode`}
             </DropdownMenuItem>
+            {/* @NOTE: Login/Sign out menu item commented out
             <DropdownMenuSeparator />
             <DropdownMenuItem asChild data-testid="user-nav-item-auth">
               <button
@@ -107,6 +122,7 @@ export function SidebarUserNav({ user }: { user: User }) {
                 {isGuest ? "Login to your account" : "Sign out"}
               </button>
             </DropdownMenuItem>
+            */}
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>

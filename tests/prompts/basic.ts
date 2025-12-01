@@ -16,7 +16,10 @@ export const TEST_PROMPTS: Record<string, ModelMessage> = {
   USER_NEXTJS: {
     role: "user",
     content: [
-      { type: "text", text: "What are the advantages of using Next.js?" },
+      {
+        type: "text",
+        text: "Tell me about Bill C-35 of the 44th Parliament",
+      },
     ],
   },
   USER_IMAGE_ATTACHMENT: {
@@ -38,7 +41,7 @@ export const TEST_PROMPTS: Record<string, ModelMessage> = {
     content: [
       {
         type: "text",
-        text: "Help me write an essay about Silicon Valley",
+        text: "Help me write an essay about Ottawa",
       },
     ],
   },

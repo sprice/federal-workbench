@@ -59,7 +59,15 @@ export const message = pgTable("Message_v2", {
   parts: json("parts").notNull(),
   attachments: json("attachments").notNull(),
   createdAt: timestamp("createdAt").notNull(),
+  // Extensible context field for RAG results (parliament, legislation, etc.)
+  context: jsonb("context").$type<MessageContext | null>(),
 });
+
+// Extensible message context - add new context types here
+export type MessageContext = {
+  parliament?: import("@/lib/ai/tools/retrieve-parliament-context").ParliamentContextResult;
+  legislation?: import("@/lib/ai/tools/retrieve-legislation-context").LegislationContextResult;
+};
 
 export type DBMessage = InferSelectModel<typeof message>;
 
@@ -76,11 +84,7 @@ export const voteDeprecated = pgTable(
       .references(() => messageDeprecated.id),
     isUpvoted: boolean("isUpvoted").notNull(),
   },
-  (table) => {
-    return {
-      pk: primaryKey({ columns: [table.chatId, table.messageId] }),
-    };
-  }
+  (table) => [primaryKey({ columns: [table.chatId, table.messageId] })]
 );
 
 export type VoteDeprecated = InferSelectModel<typeof voteDeprecated>;
@@ -96,11 +100,7 @@ export const vote = pgTable(
       .references(() => message.id),
     isUpvoted: boolean("isUpvoted").notNull(),
   },
-  (table) => {
-    return {
-      pk: primaryKey({ columns: [table.chatId, table.messageId] }),
-    };
-  }
+  (table) => [primaryKey({ columns: [table.chatId, table.messageId] })]
 );
 
 export type Vote = InferSelectModel<typeof vote>;
@@ -112,18 +112,16 @@ export const document = pgTable(
     createdAt: timestamp("createdAt").notNull(),
     title: text("title").notNull(),
     content: text("content"),
-    kind: varchar("text", { enum: ["text", "code", "image", "sheet"] })
+    kind: varchar("text", {
+      enum: ["text", "code", "image", "sheet", "legislation"],
+    })
       .notNull()
       .default("text"),
     userId: uuid("userId")
       .notNull()
       .references(() => user.id),
   },
-  (table) => {
-    return {
-      pk: primaryKey({ columns: [table.id, table.createdAt] }),
-    };
-  }
+  (table) => [primaryKey({ columns: [table.id, table.createdAt] })]
 );
 
 export type Document = InferSelectModel<typeof document>;
@@ -143,13 +141,13 @@ export const suggestion = pgTable(
       .references(() => user.id),
     createdAt: timestamp("createdAt").notNull(),
   },
-  (table) => ({
-    pk: primaryKey({ columns: [table.id] }),
-    documentRef: foreignKey({
+  (table) => [
+    primaryKey({ columns: [table.id] }),
+    foreignKey({
       columns: [table.documentId, table.documentCreatedAt],
       foreignColumns: [document.id, document.createdAt],
     }),
-  })
+  ]
 );
 
 export type Suggestion = InferSelectModel<typeof suggestion>;
@@ -161,13 +159,13 @@ export const stream = pgTable(
     chatId: uuid("chatId").notNull(),
     createdAt: timestamp("createdAt").notNull(),
   },
-  (table) => ({
-    pk: primaryKey({ columns: [table.id] }),
-    chatRef: foreignKey({
+  (table) => [
+    primaryKey({ columns: [table.id] }),
+    foreignKey({
       columns: [table.chatId],
       foreignColumns: [chat.id],
     }),
-  })
+  ]
 );
 
 export type Stream = InferSelectModel<typeof stream>;

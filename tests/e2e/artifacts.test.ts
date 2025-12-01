@@ -17,9 +17,7 @@ test.describe("Artifacts activity", () => {
     test.fixme();
     await chatPage.createNewChat();
 
-    await chatPage.sendUserMessage(
-      "Help me write an essay about Silicon Valley"
-    );
+    await chatPage.sendUserMessage("Help me write an essay about Ottawa");
     await artifactPage.isGenerationComplete();
 
     expect(artifactPage.artifact).toBeVisible();
@@ -36,9 +34,7 @@ test.describe("Artifacts activity", () => {
     test.fixme();
     await chatPage.createNewChat();
 
-    await chatPage.sendUserMessage(
-      "Help me write an essay about Silicon Valley"
-    );
+    await chatPage.sendUserMessage("Help me write an essay about Ottawa");
     await artifactPage.isGenerationComplete();
 
     expect(artifactPage.artifact).toBeVisible();
@@ -56,9 +52,7 @@ test.describe("Artifacts activity", () => {
     test.fixme();
     await chatPage.createNewChat();
 
-    await chatPage.sendUserMessage(
-      "Help me write an essay about Silicon Valley"
-    );
+    await chatPage.sendUserMessage("Help me write an essay about Ottawa");
     await artifactPage.isGenerationComplete();
 
     expect(artifactPage.artifact).toBeVisible();

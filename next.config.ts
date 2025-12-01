@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  experimental: {
-    ppr: true,
-  },
+  // Use separate build directory for tests to allow running alongside dev server
+  distDir: process.env.PLAYWRIGHT ? ".next-test" : ".next",
+  cacheComponents: true,
   images: {
     remotePatterns: [
       {

@@ -9,7 +9,11 @@ import {
 } from "@playwright/test";
 import { generateId } from "ai";
 import { getUnixTime } from "date-fns";
+// biome-ignore lint/style/noExportedImports: Re-exporting for test convenience
+import { TEST_BASE_URL } from "./constants";
 import { ChatPage } from "./pages/chat";
+
+export { TEST_BASE_URL };
 
 export type UserContext = {
   context: BrowserContext;
@@ -38,7 +42,7 @@ export async function createAuthenticatedContext({
   const email = `test-${name}@playwright.com`;
   const password = generateId();
 
-  await page.goto("http://localhost:3000/register");
+  await page.goto(`${TEST_BASE_URL}/register`);
   await page.getByPlaceholder("user@acme.com").click();
   await page.getByPlaceholder("user@acme.com").fill(email);
   await page.getByLabel("Password").click();
@@ -51,6 +55,10 @@ export async function createAuthenticatedContext({
 
   const chatPage = new ChatPage(page);
   await chatPage.createNewChat();
+  // Wait for the chat input to be ready, which indicates the page is fully loaded
+  await page
+    .getByTestId("multimodal-input")
+    .waitFor({ state: "visible", timeout: 10_000 });
   await chatPage.chooseModelFromSelector("chat-model-reasoning");
   await expect(chatPage.getSelectedModel()).resolves.toEqual("Reasoning model");
 

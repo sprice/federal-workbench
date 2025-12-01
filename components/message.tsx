@@ -1,14 +1,17 @@
 "use client";
 import type { UseChatHelpers } from "@ai-sdk/react";
 import equal from "fast-deep-equal";
-import { motion } from "framer-motion";
 import { memo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { useArtifact } from "@/hooks/use-artifact";
+import type { LegislationContextResult } from "@/lib/ai/tools/retrieve-legislation-context";
+import type { ParliamentContextResult } from "@/lib/ai/tools/retrieve-parliament-context";
 import type { Vote } from "@/lib/db/schema";
 import type { ChatMessage } from "@/lib/types";
-import { cn, sanitizeText } from "@/lib/utils";
-import { useDataStream } from "./data-stream-provider";
+import { cn, generateUUID, sanitizeText } from "@/lib/utils";
 import { DocumentToolResult } from "./document";
 import { DocumentPreview } from "./document-preview";
+import { Citations } from "./elements/citations";
 import { MessageContent } from "./elements/message";
 import { Response } from "./elements/response";
 import {
@@ -25,6 +28,12 @@ import { MessageReasoning } from "./message-reasoning";
 import { PreviewAttachment } from "./preview-attachment";
 import { Weather } from "./weather";
 
+// Regex patterns at top level for performance
+const REGEX_ACT_ID_PREFIX = /^act-/;
+// Citation patterns with prefixes: [P1], [P2], [L1], [L2], etc.
+const REGEX_PARLIAMENT_CITATION = /\[P(\d+)\](?!\()/g;
+const REGEX_LEGISLATION_CITATION = /\[L(\d+)\](?!\()/g;
+
 const PurePreviewMessage = ({
   chatId,
   message,
@@ -34,6 +43,8 @@ const PurePreviewMessage = ({
   regenerate,
   isReadonly,
   requiresScrollPadding,
+  parliamentContext: parliamentContextProp,
+  legislationContext: legislationContextProp,
 }: {
   chatId: string;
   message: ChatMessage;
@@ -43,6 +54,8 @@ const PurePreviewMessage = ({
   regenerate: UseChatHelpers<ChatMessage>["regenerate"];
   isReadonly: boolean;
   requiresScrollPadding: boolean;
+  parliamentContext: ParliamentContextResult | null;
+  legislationContext: LegislationContextResult | null;
 }) => {
   const [mode, setMode] = useState<"view" | "edit">("view");
 
@@ -50,15 +63,230 @@ const PurePreviewMessage = ({
     (part) => part.type === "file"
   );
 
-  useDataStream();
+  const { setArtifact } = useArtifact();
+
+  // Get parliament context from: 1) message context (persisted), 2) tool output, 3) prop
+  // The prop is now scoped to this specific message (via forMessageId in parent)
+  const latestParliamentContext: ParliamentContextResult | undefined = (() => {
+    // First check persisted context on the message
+    if (message.context?.parliament) {
+      return message.context.parliament;
+    }
+    // Then check if LLM called the tool (tool output in message parts)
+    const parts = message.parts || [];
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p: any = parts[i];
+      if (
+        p?.type === "tool-retrieveParliamentContext" &&
+        p?.state === "output-available" &&
+        p?.output &&
+        !("error" in p.output)
+      ) {
+        return p.output as ParliamentContextResult;
+      }
+    }
+    // Fall back to pre-fetched context passed as prop
+    // The prop is now scoped to this message's ID by the parent component
+    return parliamentContextProp ?? undefined;
+  })();
+
+  // Get legislation context from: 1) message context (persisted), 2) tool output, 3) prop
+  const latestLegislationContext: LegislationContextResult | undefined =
+    (() => {
+      // First check persisted context on the message
+      if (message.context?.legislation) {
+        return message.context.legislation;
+      }
+      // Then check if LLM called the tool (tool output in message parts)
+      const parts = message.parts || [];
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const p: any = parts[i];
+        if (
+          p?.type === "tool-retrieveLegislationContext" &&
+          p?.state === "output-available" &&
+          p?.output &&
+          !("error" in p.output)
+        ) {
+          return p.output as LegislationContextResult;
+        }
+      }
+      // Fall back to pre-fetched context passed as prop
+      return legislationContextProp ?? undefined;
+    })();
+
+  /**
+   * Convert citation markers like [P1], [L2] into markdown links.
+   * Parliament uses [Pn] prefix, legislation uses [Ln] prefix.
+   * This avoids collisions when both RAG systems return results.
+   */
+  function linkifyCitationMarkers(
+    raw: string,
+    parlCtx?: ParliamentContextResult,
+    legCtx?: LegislationContextResult
+  ): string {
+    let result = raw;
+
+    // Helper to build markdown link from citation
+    // displayId is what the user sees (just the number), not the internal prefixed ID
+    const buildLink = (
+      displayId: number,
+      citation: {
+        urlEn?: string;
+        urlFr?: string;
+        textEn: string;
+        textFr: string;
+        titleEn?: string;
+        titleFr?: string;
+      },
+      isFrench: boolean
+    ): string => {
+      const href = isFrench
+        ? (citation.urlFr ?? citation.urlEn)
+        : (citation.urlEn ?? citation.urlFr);
+      const text = isFrench ? citation.textFr : citation.textEn;
+      const citationTitle = isFrench ? citation.titleFr : citation.titleEn;
+      const title = citationTitle ? `${text} — ${citationTitle}` : text;
+      if (!href) {
+        return `[${displayId}]`;
+      }
+      return `[${displayId}](${href} "${title.replace(/"/g, "'")}")`;
+    };
+
+    // Link parliament citations [P1], [P2], etc. -> user sees [1], [2], etc.
+    if (parlCtx?.citations && parlCtx.citations.length > 0) {
+      const isFrench = parlCtx.language === "fr";
+      result = result.replace(REGEX_PARLIAMENT_CITATION, (match, numStr) => {
+        const id = Number(numStr);
+        const c = parlCtx.citations.find((ci) => ci.id === id);
+        if (!c) {
+          return match;
+        }
+        return buildLink(id, c, isFrench);
+      });
+    }
+
+    // Link legislation citations [L1], [L2], etc. -> user sees [1], [2], etc.
+    if (legCtx?.citations && legCtx.citations.length > 0) {
+      const isFrench = legCtx.language === "fr";
+      result = result.replace(REGEX_LEGISLATION_CITATION, (match, numStr) => {
+        const id = Number(numStr);
+        const c = legCtx.citations.find((ci) => ci.id === id);
+        if (!c) {
+          return match;
+        }
+        return buildLink(id, c, isFrench);
+      });
+    }
+
+    return result;
+  }
+
+  async function openParliamentSourceArtifact(sourceType: string) {
+    try {
+      const ctx = latestParliamentContext;
+      const source = ctx?.hydratedSources.find(
+        (s) => s.sourceType === sourceType
+      );
+      if (!ctx || !source) {
+        return;
+      }
+      const docId = generateUUID();
+      const isFr = source.languageUsed === "fr";
+      // Parse id like "bill-C-35-44-1" to get readable title
+      const idParts = source.id.split("-");
+      const label =
+        sourceType === "bill"
+          ? `${idParts[1]}-${idParts[2]} (${idParts[3]}-${idParts[4]})`
+          : source.id;
+      const title = isFr
+        ? `${sourceType} — ${label} — Texte intégral`
+        : `${sourceType} — ${label} — Full Text`;
+      const content = source.markdown;
+
+      // Persist document so it survives refresh/versioning
+      await fetch(`/api/document?id=${docId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, title, kind: "text" }),
+      });
+
+      // Show artifact panel with the saved document
+      setArtifact((a) => ({
+        ...a,
+        documentId: docId,
+        title,
+        kind: "text",
+        content,
+        isVisible: true,
+        status: "idle",
+      }));
+    } catch (err) {
+      console.error("[openParliamentSourceArtifact] error:", err);
+    }
+  }
+
+  async function openLegislationSourceArtifact(sourceType: string) {
+    try {
+      const ctx = latestLegislationContext;
+      const source = ctx?.hydratedSources.find(
+        (s) => s.sourceType === sourceType
+      );
+      if (!ctx || !source) {
+        return;
+      }
+      const docId = generateUUID();
+      const language = source.languageUsed || "en";
+      const isFr = language === "fr";
+      // Parse id like "act-C-46" to get readable title
+      const actId = source.id.replace(REGEX_ACT_ID_PREFIX, "");
+      const title = isFr
+        ? `Loi — ${actId} — Texte intégral`
+        : `Act — ${actId} — Full Text`;
+      // Store actId and language as JSON for the legislation artifact
+      const content = JSON.stringify({ actId, language });
+
+      // Persist document so it survives refresh/versioning
+      const res = await fetch(`/api/document?id=${docId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, title, kind: "legislation" }),
+      });
+      if (!res.ok) {
+        console.error(
+          "[openLegislationSourceArtifact] Failed to save document:",
+          res.status
+        );
+        return;
+      }
+
+      // Show artifact panel with the saved document
+      setArtifact((a) => ({
+        ...a,
+        documentId: docId,
+        title,
+        kind: "legislation",
+        content,
+        isVisible: true,
+        status: "idle",
+      }));
+    } catch (err) {
+      console.error("[openLegislationSourceArtifact] error:", err);
+    }
+  }
+
+  const billSource = latestParliamentContext?.hydratedSources?.find(
+    (s) => s.sourceType === "bill"
+  );
+
+  const actSource = latestLegislationContext?.hydratedSources?.find(
+    (s) => s.sourceType === "act"
+  );
 
   return (
-    <motion.div
-      animate={{ opacity: 1 }}
-      className="group/message w-full"
+    <div
+      className="group/message fade-in w-full animate-in duration-200"
       data-role={message.role}
       data-testid={`message-${message.role}`}
-      initial={{ opacity: 0 }}
     >
       <div
         className={cn("flex w-full items-start gap-2 md:gap-3", {
@@ -138,7 +366,15 @@ const PurePreviewMessage = ({
                           : undefined
                       }
                     >
-                      <Response>{sanitizeText(part.text)}</Response>
+                      <Response>
+                        {sanitizeText(
+                          linkifyCitationMarkers(
+                            part.text,
+                            latestParliamentContext,
+                            latestLegislationContext
+                          )
+                        )}
+                      </Response>
                     </MessageContent>
                   </div>
                 );
@@ -178,7 +414,15 @@ const PurePreviewMessage = ({
                     {state === "output-available" && (
                       <ToolOutput
                         errorText={undefined}
-                        output={<Weather weatherAtLocation={part.output} />}
+                        output={
+                          part.output && "error" in part.output ? (
+                            <div className="rounded border p-2 text-red-500">
+                              Error: {String(part.output.error)}
+                            </div>
+                          ) : (
+                            <Weather weatherAtLocation={part.output} />
+                          )
+                        }
                       />
                     )}
                   </ToolContent>
@@ -267,8 +511,67 @@ const PurePreviewMessage = ({
               );
             }
 
+            // Hide retrieveParliamentContext tool card in the UI, but still
+            // use its output for inline [n] citation linking above.
+            if (type === "tool-retrieveParliamentContext") {
+              return null;
+            }
+
+            // Hide retrieveLegislationContext tool card in the UI
+            if (type === "tool-retrieveLegislationContext") {
+              return null;
+            }
+
             return null;
           })}
+
+          {!isLoading &&
+            message.role === "assistant" &&
+            latestParliamentContext?.citations &&
+            latestParliamentContext.citations.length > 0 && (
+              <Citations
+                citations={latestParliamentContext.citations}
+                language={latestParliamentContext.language}
+              />
+            )}
+
+          {!isLoading && message.role === "assistant" && billSource ? (
+            <div className="mt-2">
+              <Button
+                onClick={() => openParliamentSourceArtifact("bill")}
+                size="sm"
+                variant="outline"
+              >
+                {latestParliamentContext?.language === "fr"
+                  ? "Ouvrir le projet de loi"
+                  : "Open Bill"}
+              </Button>
+            </div>
+          ) : null}
+
+          {!isLoading &&
+            message.role === "assistant" &&
+            latestLegislationContext?.citations &&
+            latestLegislationContext.citations.length > 0 && (
+              <Citations
+                citations={latestLegislationContext.citations}
+                language={latestLegislationContext.language}
+              />
+            )}
+
+          {!isLoading && message.role === "assistant" && actSource ? (
+            <div className="mt-2">
+              <Button
+                onClick={() => openLegislationSourceArtifact("act")}
+                size="sm"
+                variant="outline"
+              >
+                {latestLegislationContext?.language === "fr"
+                  ? "Afficher la loi"
+                  : "Show Act"}
+              </Button>
+            </div>
+          ) : null}
 
           {!isReadonly && (
             <MessageActions
@@ -282,7 +585,7 @@ const PurePreviewMessage = ({
           )}
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 };
 
@@ -310,30 +613,30 @@ export const PreviewMessage = memo(
 );
 
 export const ThinkingMessage = () => {
-  const role = "assistant";
-
   return (
-    <motion.div
-      animate={{ opacity: 1 }}
-      className="group/message w-full"
-      data-role={role}
+    <div
+      className="group/message fade-in w-full animate-in duration-300"
+      data-role="assistant"
       data-testid="message-assistant-loading"
-      exit={{ opacity: 0, transition: { duration: 0.5 } }}
-      initial={{ opacity: 0 }}
-      transition={{ duration: 0.2 }}
     >
       <div className="flex items-start justify-start gap-3">
         <div className="-mt-1 flex size-8 shrink-0 items-center justify-center rounded-full bg-background ring-1 ring-border">
-          <SparklesIcon size={14} />
+          <div className="animate-pulse">
+            <SparklesIcon size={14} />
+          </div>
         </div>
 
         <div className="flex w-full flex-col gap-2 md:gap-4">
-          <div className="p-0 text-muted-foreground text-sm">
-            Thinking...
+          <div className="flex items-center gap-1 p-0 text-muted-foreground text-sm">
+            <span className="animate-pulse">Thinking</span>
+            <span className="inline-flex">
+              <span className="animate-bounce [animation-delay:0ms]">.</span>
+              <span className="animate-bounce [animation-delay:150ms]">.</span>
+              <span className="animate-bounce [animation-delay:300ms]">.</span>
+            </span>
           </div>
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 };
-

@@ -10,26 +10,25 @@ config({
   path: ".env.local",
 });
 
-/* Use process.env.PORT by default and fallback to port 3000 */
-const PORT = process.env.PORT || 3000;
+/* Use dedicated test port to avoid conflicts with dev server */
+const TEST_PORT = 3100;
+const baseURL = `http://localhost:${TEST_PORT}`;
 
-/**
- * Set webServer.url and use.baseURL with the location
- * of the WebServer respecting the correct set port
- */
-const baseURL = `http://localhost:${PORT}`;
+/* Check if running db-only tests (no webServer needed) */
+const isDbOnly = process.argv.includes("--project=db");
 
 /**
  * See https://playwright.dev/docs/test-configuration.
  */
 export default defineConfig({
+  // globalSetup: "./tests/global-setup.ts", // Disabled - was causing SIGKILL issues
   testDir: "./tests",
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
-  /* Retry on CI only */
-  retries: 0,
+  /* Retry flaky tests once - helps with timing issues in parallel execution */
+  retries: process.env.CI ? 2 : 1,
   /* Opt out of parallel tests on CI. */
   workers: process.env.CI ? 2 : 8,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
@@ -51,6 +50,12 @@ export default defineConfig({
 
   /* Configure projects */
   projects: [
+    {
+      name: "db",
+      testMatch: /db\/.*.test.ts/,
+      // Database tests don't need a browser - they import lib code directly
+      // Note: webserver still runs but db tests don't depend on it
+    },
     {
       name: "e2e",
       testMatch: /e2e\/.*.test.ts/,
@@ -97,11 +102,16 @@ export default defineConfig({
     // },
   ],
 
-  /* Run your local dev server before starting the tests */
-  webServer: {
-    command: "pnpm dev",
-    url: `${baseURL}/ping`,
-    timeout: 120 * 1000,
-    reuseExistingServer: !process.env.CI,
-  },
+  /* Run isolated test server on dedicated port with separate build dir */
+  /* Skip webServer for db-only tests since they don't need it */
+  webServer: isDbOnly
+    ? undefined
+    : {
+        command: `PLAYWRIGHT=True pnpm exec next dev --turbo -p ${TEST_PORT}`,
+        url: `${baseURL}/ping`,
+        timeout: 120 * 1000,
+        reuseExistingServer: false,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
 });

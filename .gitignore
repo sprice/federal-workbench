@@ -10,6 +10,7 @@ coverage
 
 # next.js
 .next/
+.next-test/
 out/
 build
 
@@ -37,8 +38,30 @@ yarn-error.log*
 .vercel
 .env*.local
 
+# typescript
+*.tsbuildinfo
+
 # Playwright
 /test-results/
 /playwright-report/
 /blob-report/
 /playwright/*
+.playwright-mcp
+
+# Parliament data
+data/parliament/openparliament.public.sql
+
+# Embedding progress tracking (SQLite)
+scripts/.embedding-progress.db
+scripts/.embedding-progress.db-wal
+scripts/.embedding-progress.db-shm
+
+# AI Coding
+.plans
+.mcp.json
+.claude/settings.local.json
+
+third-party/
+plans/
+
+

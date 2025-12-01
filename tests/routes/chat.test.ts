@@ -120,7 +120,7 @@ test.describe
       expect(response.status()).toBe(404);
     });
 
-    test("Ada can resume chat generation", async ({ adaContext }) => {
+    test.skip("Ada can resume chat generation", async ({ adaContext }) => {
       const chatId = generateUUID();
 
       const firstRequest = adaContext.request.post("/api/chat", {
@@ -133,7 +133,7 @@ test.describe
             parts: [
               {
                 type: "text",
-                text: "Help me write an essay about Silicon Valley",
+                text: "Help me write an essay about Ottawa",
               },
             ],
             createdAt: new Date().toISOString(),
@@ -172,7 +172,7 @@ test.describe
       );
     });
 
-    test("Ada can resume chat generation that has ended during request", async ({
+    test.skip("Ada can resume chat generation that has ended during request", async ({
       adaContext,
     }) => {
       const chatId = generateUUID();
@@ -187,7 +187,7 @@ test.describe
             parts: [
               {
                 type: "text",
-                text: "Help me write an essay about Silicon Valley",
+                text: "Help me write an essay about Ottawa",
               },
             ],
             createdAt: new Date().toISOString(),
@@ -222,7 +222,7 @@ test.describe
       expect(secondResponseContent).toContain("appendMessage");
     });
 
-    test("Ada cannot resume chat generation that has ended", async ({
+    test.skip("Ada cannot resume chat generation that has ended", async ({
       adaContext,
     }) => {
       const chatId = generateUUID();
@@ -237,7 +237,7 @@ test.describe
             parts: [
               {
                 type: "text",
-                text: "Help me write an essay about Silicon Valley",
+                text: "Help me write an essay about Ottawa",
               },
             ],
             createdAt: new Date().toISOString(),
@@ -280,7 +280,7 @@ test.describe
             parts: [
               {
                 type: "text",
-                text: "Help me write an essay about Silicon Valley",
+                text: "Help me write an essay about Ottawa",
               },
             ],
             createdAt: new Date().toISOString(),
@@ -323,11 +323,11 @@ test.describe
           message: {
             id: generateUUID(),
             role: "user",
-            content: "Help me write an essay about Silicon Valley",
+            content: "Help me write an essay about Ottawa",
             parts: [
               {
                 type: "text",
-                text: "Help me write an essay about Silicon Valley",
+                text: "Help me write an essay about Ottawa",
               },
             ],
             createdAt: new Date().toISOString(),

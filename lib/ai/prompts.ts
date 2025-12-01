@@ -50,20 +50,32 @@ About the origin of user's request:
 - country: ${requestHints.country}
 `;
 
+export function languageLabel(
+  language: "en" | "fr" | "unknown"
+): "English" | "French" | "English" {
+  if (language === "fr") {
+    return "French";
+  }
+  return "English";
+}
+
 export const systemPrompt = ({
   selectedChatModel,
   requestHints,
+  language = "unknown",
 }: {
   selectedChatModel: string;
   requestHints: RequestHints;
+  language?: "en" | "fr" | "unknown";
 }) => {
   const requestPrompt = getRequestPromptFromHints(requestHints);
+  const langLine = `Respond in ${languageLabel(language)}.`;
 
   if (selectedChatModel === "chat-model-reasoning") {
-    return `${regularPrompt}\n\n${requestPrompt}`;
+    return `${regularPrompt}\n\n${langLine}\n\n${requestPrompt}`;
   }
 
-  return `${regularPrompt}\n\n${requestPrompt}\n\n${artifactsPrompt}`;
+  return `${regularPrompt}\n\n${langLine}\n\n${requestPrompt}\n\n${artifactsPrompt}`;
 };
 
 export const codePrompt = `
@@ -117,4 +129,65 @@ export const titlePrompt = `\n
     - you will generate a short title based on the first message a user begins a conversation with
     - ensure it is not more than 80 characters long
     - the title should be a summary of the user's message
-    - do not use quotes or colons`
+    - do not use quotes or colons
+    - use plain text only, no markdown`;
+
+// RAG: Search type detection prompt for small-model
+export function searchTypesPrompt(query: string): string {
+  return `Analyze this Canadian Parliament query and determine which data sources are relevant.
+Set each source type to true if the query relates to that type of information.
+A query can match multiple source types.
+
+Query: "${query}"`;
+}
+
+// RAG: Query reformulation prompt for small-model
+export function queryReformulationPrompt(
+  query: string,
+  language: "en" | "fr"
+): string {
+  const langName = language === "fr" ? "French" : "English";
+  return `Generate 2-3 alternative search queries for the following Canadian Parliament query.
+Each variation should:
+- Use synonyms and related terms
+- Phrase the question differently
+- Help find relevant documents that might use different terminology
+- Be in ${langName} (same language as the original)
+
+Original query: "${query}"
+
+Generate diverse reformulations that would help find relevant parliamentary documents.`;
+}
+
+// Parliament‑aware system prompt for RAG chat
+export function parliamentPrompt({
+  requestHints,
+  language,
+  context,
+}: {
+  requestHints: RequestHints;
+  language: "en" | "fr" | "unknown";
+  context?: string; // compact, cited context from retrieval tool
+}) {
+  const req = getRequestPromptFromHints(requestHints);
+  const core = [
+    "You are an assistant for the Parliament of Canada.",
+    `Respond in ${languageLabel(language)}.`,
+    "Use the provided context",
+    "Do not include citations in your response. They are embedded automatically for each response.",
+    "Be concise, factual, and reference parts/sections when relevant.",
+  ];
+
+  return [
+    core.join(" "),
+    "",
+    req,
+    context ? `Context (use to answer):\n${context}` : undefined,
+    "",
+    "— Usage notes —",
+    "- Call 'retrieveParliamentContext' to fetch authoritative context and sources before answering questions about Parliament.",
+    "- Keep responses short and structured; use bullets when helpful.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}

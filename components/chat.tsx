@@ -20,6 +20,8 @@ import {
 import { useArtifactSelector } from "@/hooks/use-artifact";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { useChatVisibility } from "@/hooks/use-chat-visibility";
+import type { LegislationContextResult } from "@/lib/ai/tools/retrieve-legislation-context";
+import type { ParliamentContextResult } from "@/lib/ai/tools/retrieve-parliament-context";
 import type { Vote } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
@@ -60,6 +62,22 @@ export function Chat({
 
   const [input, setInput] = useState<string>("");
   const [usage, setUsage] = useState<AppUsage | undefined>(initialLastContext);
+  const [parliamentContext, setParliamentContext] = useState<{
+    data: ParliamentContextResult;
+    forMessageId: string | null;
+  } | null>(null);
+  const parliamentContextRef = useRef<{
+    data: ParliamentContextResult;
+    forMessageId: string | null;
+  } | null>(null);
+  const [legislationContext, setLegislationContext] = useState<{
+    data: LegislationContextResult;
+    forMessageId: string | null;
+  } | null>(null);
+  const legislationContextRef = useRef<{
+    data: LegislationContextResult;
+    forMessageId: string | null;
+  } | null>(null);
   const [showCreditCardAlert, setShowCreditCardAlert] = useState(false);
   const [currentModelId, setCurrentModelId] = useState(initialChatModel);
   const currentModelIdRef = useRef(currentModelId);
@@ -67,6 +85,14 @@ export function Chat({
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
+
+  useEffect(() => {
+    parliamentContextRef.current = parliamentContext;
+  }, [parliamentContext]);
+
+  useEffect(() => {
+    legislationContextRef.current = legislationContext;
+  }, [legislationContext]);
 
   const {
     messages,
@@ -101,9 +127,65 @@ export function Chat({
       if (dataPart.type === "data-usage") {
         setUsage(dataPart.data);
       }
+      if (dataPart.type === "data-parliamentContext") {
+        // Track context with the message it's for (will be set in onFinish)
+        setParliamentContext({
+          data: dataPart.data as ParliamentContextResult,
+          forMessageId: null, // Will be updated when we know the assistant message ID
+        });
+      }
+      if (dataPart.type === "data-legislationContext") {
+        // Track context with the message it's for (will be set in onFinish)
+        setLegislationContext({
+          data: dataPart.data as LegislationContextResult,
+          forMessageId: null, // Will be updated when we know the assistant message ID
+        });
+      }
     },
     onFinish: () => {
       mutate(unstable_serialize(getChatHistoryPaginationKey));
+      // Attach RAG contexts to the last assistant message in React state
+      // This ensures citations/buttons show immediately without needing refresh
+      const parlCtx = parliamentContextRef.current;
+      const legCtx = legislationContextRef.current;
+      if (parlCtx || legCtx) {
+        setMessages((currentMessages) => {
+          const lastAssistantIdx = currentMessages.findLastIndex(
+            (m) => m.role === "assistant"
+          );
+          if (lastAssistantIdx === -1) {
+            return currentMessages;
+          }
+
+          const lastAssistantId = currentMessages[lastAssistantIdx].id;
+
+          // Update context tracking with the message ID
+          if (parlCtx) {
+            setParliamentContext({
+              data: parlCtx.data,
+              forMessageId: lastAssistantId,
+            });
+          }
+          if (legCtx) {
+            setLegislationContext({
+              data: legCtx.data,
+              forMessageId: lastAssistantId,
+            });
+          }
+
+          return currentMessages.map((msg, idx) =>
+            idx === lastAssistantIdx
+              ? {
+                  ...msg,
+                  context: {
+                    ...(parlCtx ? { parliament: parlCtx.data } : {}),
+                    ...(legCtx ? { legislation: legCtx.data } : {}),
+                  },
+                }
+              : msg
+          );
+        });
+      }
     },
     onError: (error) => {
       if (error instanceof ChatSDKError) {
@@ -135,7 +217,7 @@ export function Chat({
       });
 
       setHasAppendedQuery(true);
-      window.history.replaceState({}, "", `/chat/${id}`);
+      window.history.replaceState({}, "", `/workbench/${id}`);
     }
   }, [query, sendMessage, hasAppendedQuery, id]);
 
@@ -156,7 +238,7 @@ export function Chat({
 
   return (
     <>
-      <div className="overscroll-behavior-contain flex h-dvh min-w-0 touch-pan-y flex-col bg-background">
+      <div className="overscroll-behavior-contain flex h-full min-w-0 touch-pan-y flex-col bg-background">
         <ChatHeader
           chatId={id}
           isReadonly={isReadonly}
@@ -167,7 +249,9 @@ export function Chat({
           chatId={id}
           isArtifactVisible={isArtifactVisible}
           isReadonly={isReadonly}
+          legislationContext={legislationContext}
           messages={messages}
+          parliamentContext={parliamentContext}
           regenerate={regenerate}
           selectedModelId={initialChatModel}
           setMessages={setMessages}

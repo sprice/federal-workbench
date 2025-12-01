@@ -8,11 +8,6 @@ import {
   streamText,
 } from "ai";
 import { unstable_cache as cache } from "next/cache";
-import { after } from "next/server";
-import {
-  createResumableStreamContext,
-  type ResumableStreamContext,
-} from "resumable-stream";
 import type { ModelCatalog } from "tokenlens/core";
 import { fetchModels } from "tokenlens/fetch";
 import { getUsage } from "tokenlens/helpers";
@@ -20,16 +15,30 @@ import { auth, type UserType } from "@/app/(auth)/auth";
 import type { VisibilityType } from "@/components/visibility-selector";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import type { ChatModel } from "@/lib/ai/models";
-import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
+import {
+  parliamentPrompt,
+  type RequestHints,
+  systemPrompt,
+} from "@/lib/ai/prompts";
 import { myProvider } from "@/lib/ai/providers";
 import { createDocument } from "@/lib/ai/tools/create-document";
 import { getWeather } from "@/lib/ai/tools/get-weather";
 import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
+import {
+  getLegislationContext,
+  type LegislationContextResult,
+  retrieveLegislationContext,
+} from "@/lib/ai/tools/retrieve-legislation-context";
+import {
+  getParliamentContext,
+  retrieveParliamentContext,
+} from "@/lib/ai/tools/retrieve-parliament-context";
 import { updateDocument } from "@/lib/ai/tools/update-document";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
   deleteChatById,
+  ensureUserExistsById,
   getChatById,
   getMessageCountByUserId,
   getMessagesByChatId,
@@ -39,6 +48,8 @@ import {
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
+import { ragDebug, resetRagTimer } from "@/lib/rag/parliament/debug";
+import { detectLanguage } from "@/lib/rag/parliament/query-analysis";
 import type { ChatMessage } from "@/lib/types";
 import type { AppUsage } from "@/lib/usage";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
@@ -46,8 +57,6 @@ import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
 export const maxDuration = 60;
-
-let globalStreamContext: ResumableStreamContext | null = null;
 
 const getTokenlensCatalog = cache(
   async (): Promise<ModelCatalog | undefined> => {
@@ -65,27 +74,18 @@ const getTokenlensCatalog = cache(
   { revalidate: 24 * 60 * 60 } // 24 hours
 );
 
-export function getStreamContext() {
-  if (!globalStreamContext) {
-    try {
-      globalStreamContext = createResumableStreamContext({
-        waitUntil: after,
-      });
-    } catch (error: any) {
-      if (error.message.includes("REDIS_URL")) {
-        console.log(
-          " > Resumable streams are disabled due to missing REDIS_URL"
-        );
-      } else {
-        console.error(error);
-      }
-    }
-  }
+const dbg = ragDebug("route");
 
-  return globalStreamContext;
-}
+// RAG feature flags - any truthy value enables
+// Check both prefixed and non-prefixed versions for flexibility
+const isParlRagEnabled =
+  !!process.env.PARL_RAG_ENABLED || !!process.env.NEXT_PUBLIC_PARL_RAG_ENABLED;
+const isLegRagEnabled =
+  !!process.env.LEG_RAG_ENABLED || !!process.env.NEXT_PUBLIC_LEG_RAG_ENABLED;
 
 export async function POST(request: Request) {
+  resetRagTimer();
+
   let requestBody: PostRequestBody;
 
   try {
@@ -124,6 +124,12 @@ export async function POST(request: Request) {
     if (messageCount > entitlementsByUserType[userType].maxMessagesPerDay) {
       return new ChatSDKError("rate_limit:chat").toResponse();
     }
+
+    // Ensure the user row exists (dev sessions can survive DB resets)
+    await ensureUserExistsById({
+      id: session.user.id,
+      email: session.user.email || undefined,
+    });
 
     const chat = await getChatById({ id });
     let messagesFromDb: DBMessage[] = [];
@@ -168,6 +174,7 @@ export async function POST(request: Request) {
           parts: message.parts,
           attachments: [],
           createdAt: new Date(),
+          context: null,
         },
       ],
     });
@@ -177,22 +184,125 @@ export async function POST(request: Request) {
 
     let finalMergedUsage: AppUsage | undefined;
 
+    // Try to assemble RAG context for the latest user message (lightweight pre-retrieval)
+    const requestStart = Date.now();
+    const userText = (message.parts || [])
+      .map((p: any) => (p?.type === "text" ? p.text : ""))
+      .join("\n")
+      .trim();
+    let ragSystem: string | undefined;
+    let langGuess: "en" | "fr" | "unknown" = "unknown";
+    let ragMs = 0;
+    let parlResult:
+      | Awaited<ReturnType<typeof getParliamentContext>>
+      | undefined;
+    let legResult: LegislationContextResult | undefined;
+
+    try {
+      if (userText) {
+        const ragStart = Date.now();
+
+        // Fetch enabled RAG contexts in parallel
+        const ragPromises: Promise<void>[] = [];
+
+        if (isParlRagEnabled) {
+          ragPromises.push(
+            getParliamentContext(userText, 10).then((r) => {
+              parlResult = r;
+            })
+          );
+        }
+
+        if (isLegRagEnabled) {
+          ragPromises.push(
+            getLegislationContext(userText, 10).then((r) => {
+              legResult = r;
+            })
+          );
+        }
+
+        await Promise.all(ragPromises);
+        ragMs = Date.now() - ragStart;
+
+        // Use parliament language detection if available, fallback to legislation, then detect
+        langGuess =
+          parlResult?.language ??
+          legResult?.language ??
+          detectLanguage(userText).language;
+
+        dbg(
+          "prefetch: lang=%s parlTypes=%d legCitations=%d ragMs=%d",
+          langGuess,
+          parlResult?.hydratedSources?.length ?? 0,
+          legResult?.citations?.length ?? 0,
+          ragMs
+        );
+
+        // Build combined context prompt
+        const contextParts: string[] = [];
+        if (parlResult?.prompt) {
+          contextParts.push(parlResult.prompt);
+        }
+        if (legResult?.prompt) {
+          contextParts.push(legResult.prompt);
+        }
+
+        if (contextParts.length > 0) {
+          ragSystem = parliamentPrompt({
+            requestHints,
+            language: langGuess,
+            context: contextParts.join("\n\n"),
+          });
+        }
+      }
+    } catch {
+      // RAG failed - detect language for fallback prompt
+      ragMs = Date.now() - requestStart;
+      langGuess = userText ? detectLanguage(userText).language : "unknown";
+      ragSystem = undefined;
+    }
+
     const stream = createUIMessageStream({
       execute: ({ writer: dataStream }) => {
+        // Send pre-fetched RAG contexts to client for UI features
+        if (parlResult) {
+          dataStream.write({
+            type: "data-parliamentContext",
+            data: parlResult,
+          });
+        }
+        if (legResult) {
+          dataStream.write({
+            type: "data-legislationContext",
+            data: legResult,
+          });
+        }
         const result = streamText({
           model: myProvider.languageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
+          system:
+            ragSystem ??
+            systemPrompt({
+              selectedChatModel,
+              requestHints,
+              language: langGuess,
+            }),
           messages: convertToModelMessages(uiMessages),
           stopWhen: stepCountIs(5),
           experimental_activeTools:
             selectedChatModel === "chat-model-reasoning"
               ? []
-              : [
+              : ([
                   "getWeather",
                   "createDocument",
                   "updateDocument",
                   "requestSuggestions",
-                ],
+                  ...(isParlRagEnabled
+                    ? (["retrieveParliamentContext"] as const)
+                    : []),
+                  ...(isLegRagEnabled
+                    ? (["retrieveLegislationContext"] as const)
+                    : []),
+                ] as const),
           experimental_transform: smoothStream({ chunking: "word" }),
           tools: {
             getWeather,
@@ -202,7 +312,17 @@ export async function POST(request: Request) {
               session,
               dataStream,
             }),
+            ...(isParlRagEnabled ? { retrieveParliamentContext } : {}),
+            ...(isLegRagEnabled ? { retrieveLegislationContext } : {}),
           },
+          providerOptions:
+            selectedChatModel === "chat-model-reasoning"
+              ? {
+                  openai: {
+                    reasoningSummary: "detailed",
+                  },
+                }
+              : undefined,
           experimental_telemetry: {
             isEnabled: isProductionEnvironment,
             functionId: "stream-text",
@@ -245,12 +365,31 @@ export async function POST(request: Request) {
 
         dataStream.merge(
           result.toUIMessageStream({
-            sendReasoning: true,
+            sendReasoning: selectedChatModel === "chat-model-reasoning",
           })
         );
       },
       generateId: generateUUID,
       onFinish: async ({ messages }) => {
+        const totalMs = Date.now() - requestStart;
+        const llmMs = totalMs - ragMs;
+        dbg(
+          "complete: totalMs=%d ragMs=%d llmMs=%d query=%s",
+          totalMs,
+          ragMs,
+          llmMs,
+          userText.slice(0, 50)
+        );
+
+        // Build RAG context object for assistant messages
+        const ragContext =
+          parlResult || legResult
+            ? {
+                ...(parlResult ? { parliament: parlResult } : {}),
+                ...(legResult ? { legislation: legResult } : {}),
+              }
+            : null;
+
         await saveMessages({
           messages: messages.map((currentMessage) => ({
             id: currentMessage.id,
@@ -259,6 +398,8 @@ export async function POST(request: Request) {
             createdAt: new Date(),
             attachments: [],
             chatId: id,
+            // Attach RAG context to assistant messages
+            context: currentMessage.role === "assistant" ? ragContext : null,
           })),
         });
 

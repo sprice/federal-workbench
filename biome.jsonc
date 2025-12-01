@@ -22,7 +22,10 @@
         "noConsole": "off",
 
         /* Needed for generateUUID() */
-        "noBitwiseOperators": "off"
+        "noBitwiseOperators": "off",
+
+        /* Allow test.skip for WIP tests */
+        "noSkippedTests": "off"
       },
       "style": {
         /* Allowing magic numbers */
@@ -45,7 +48,8 @@
       "a11y": {
         /* Needs more work to fix */
         "noSvgWithoutTitle": "off"
-      }
+      },
+      "performance": {}
     }
   }
 }

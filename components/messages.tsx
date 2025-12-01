@@ -1,9 +1,10 @@
 import type { UseChatHelpers } from "@ai-sdk/react";
 import equal from "fast-deep-equal";
-import { AnimatePresence } from "framer-motion";
 import { ArrowDownIcon } from "lucide-react";
-import { memo, useEffect } from "react";
+import { memo } from "react";
 import { useMessages } from "@/hooks/use-messages";
+import type { LegislationContextResult } from "@/lib/ai/tools/retrieve-legislation-context";
+import type { ParliamentContextResult } from "@/lib/ai/tools/retrieve-parliament-context";
 import type { Vote } from "@/lib/db/schema";
 import type { ChatMessage } from "@/lib/types";
 import { useDataStream } from "./data-stream-provider";
@@ -21,6 +22,14 @@ type MessagesProps = {
   isReadonly: boolean;
   isArtifactVisible: boolean;
   selectedModelId: string;
+  parliamentContext: {
+    data: ParliamentContextResult;
+    forMessageId: string | null;
+  } | null;
+  legislationContext: {
+    data: LegislationContextResult;
+    forMessageId: string | null;
+  } | null;
 };
 
 function PureMessages({
@@ -31,7 +40,9 @@ function PureMessages({
   setMessages,
   regenerate,
   isReadonly,
-  selectedModelId,
+  selectedModelId: _selectedModelId,
+  parliamentContext,
+  legislationContext,
 }: MessagesProps) {
   const {
     containerRef: messagesContainerRef,
@@ -45,25 +56,10 @@ function PureMessages({
 
   useDataStream();
 
-  useEffect(() => {
-    if (status === "submitted") {
-      requestAnimationFrame(() => {
-        const container = messagesContainerRef.current;
-        if (container) {
-          container.scrollTo({
-            top: container.scrollHeight,
-            behavior: "smooth",
-          });
-        }
-      });
-    }
-  }, [status, messagesContainerRef]);
-
   return (
     <div
-      className="overscroll-behavior-contain -webkit-overflow-scrolling-touch flex-1 touch-pan-y overflow-y-scroll"
+      className="relative flex-1 touch-pan-y overflow-y-auto"
       ref={messagesContainerRef}
-      style={{ overflowAnchor: "none" }}
     >
       <Conversation className="mx-auto flex min-w-0 max-w-4xl flex-col gap-4 md:gap-6">
         <ConversationContent className="flex flex-col gap-4 px-2 py-4 md:gap-6 md:px-4">
@@ -77,7 +73,23 @@ function PureMessages({
               }
               isReadonly={isReadonly}
               key={message.id}
+              legislationContext={
+                // Pass context data only for the message it belongs to
+                legislationContext &&
+                (legislationContext.forMessageId === message.id ||
+                  legislationContext.forMessageId === null)
+                  ? legislationContext.data
+                  : null
+              }
               message={message}
+              parliamentContext={
+                // Pass context data only for the message it belongs to
+                parliamentContext &&
+                (parliamentContext.forMessageId === message.id ||
+                  parliamentContext.forMessageId === null)
+                  ? parliamentContext.data
+                  : null
+              }
               regenerate={regenerate}
               requiresScrollPadding={
                 hasSentMessage && index === messages.length - 1
@@ -91,9 +103,7 @@ function PureMessages({
             />
           ))}
 
-          <AnimatePresence mode="wait">
-            {status === "submitted" && <ThinkingMessage key="thinking" />}
-          </AnimatePresence>
+          {status === "submitted" && <ThinkingMessage />}
 
           <div
             className="min-h-[24px] min-w-[24px] shrink-0"

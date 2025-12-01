@@ -12,8 +12,6 @@ import {
   lt,
   type SQL,
 } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
 import type { ArtifactKind } from "@/components/artifact";
 import type { VisibilityType } from "@/components/visibility-selector";
 import { ChatSDKError } from "../errors";
@@ -38,9 +36,10 @@ import { generateHashedPassword } from "./utils";
 // use the Drizzle adapter for Auth.js / NextAuth
 // https://authjs.dev/reference/adapter/drizzle
 
-// biome-ignore lint: Forbidden non-null assertion.
-const client = postgres(process.env.POSTGRES_URL!);
-const db = drizzle(client);
+import { getDb } from "./connection";
+
+const db = getDb();
+const dbgDb = require("debug")("db:queries");
 
 export async function getUser(email: string): Promise<User[]> {
   try {
@@ -80,6 +79,39 @@ export async function createGuestUser() {
   }
 }
 
+export async function ensureUserExistsById({
+  id,
+  email,
+}: {
+  id: string;
+  email?: string | null;
+}) {
+  try {
+    const existing = await db
+      .select()
+      .from(user)
+      .where(eq(user.id, id))
+      .limit(1);
+    if (existing.length > 0) {
+      return existing[0];
+    }
+    // Insert minimal user row with provided id; email is required by schema
+    const safeEmail = email?.trim() ? email : `guest-${Date.now()}`;
+    const inserted = await db
+      .insert(user)
+      .values({ id, email: safeEmail })
+      .returning();
+    return inserted[0];
+  } catch (error) {
+    dbgDb("ensureUserExistsById failed: %o", error);
+    // Do not crash callers; let upstream handle DB failures consistently
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to ensure user exists"
+    );
+  }
+}
+
 export async function saveChat({
   id,
   userId,
@@ -99,7 +131,8 @@ export async function saveChat({
       title,
       visibility,
     });
-  } catch (_error) {
+  } catch (error) {
+    dbgDb("saveChat failed: %o", error);
     throw new ChatSDKError("bad_request:database", "Failed to save chat");
   }
 }
@@ -134,7 +167,7 @@ export async function deleteAllChatsByUserId({ userId }: { userId: string }) {
       return { deletedCount: 0 };
     }
 
-    const chatIds = userChats.map(c => c.id);
+    const chatIds = userChats.map((c) => c.id);
 
     await db.delete(vote).where(inArray(vote.chatId, chatIds));
     await db.delete(message).where(inArray(message.chatId, chatIds));
@@ -246,7 +279,8 @@ export async function getChatById({ id }: { id: string }) {
 export async function saveMessages({ messages }: { messages: DBMessage[] }) {
   try {
     return await db.insert(message).values(messages);
-  } catch (_error) {
+  } catch (error) {
+    dbgDb("saveMessages failed: %o", error);
     throw new ChatSDKError("bad_request:database", "Failed to save messages");
   }
 }

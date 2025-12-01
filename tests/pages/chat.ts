@@ -3,8 +3,11 @@ import path from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { chatModels } from "@/lib/ai/models";
 
-const CHAT_ID_REGEX =
-  /^http:\/\/localhost:3000\/chat\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+import { TEST_BASE_URL } from "../constants";
+
+const CHAT_ID_REGEX = new RegExp(
+  `^${TEST_BASE_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/workbench/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+);
 
 export class ChatPage {
   private readonly page: Page;
@@ -34,7 +37,7 @@ export class ChatPage {
   }
 
   async createNewChat() {
-    await this.page.goto("/");
+    await this.page.goto("/workbench");
   }
 
   getCurrentURL(): string {
@@ -69,7 +72,9 @@ export class ChatPage {
 
   async sendUserMessageFromSuggestion() {
     await this.page
-      .getByRole("button", { name: "What are the advantages of" })
+      .getByRole("button", {
+        name: "Tell me about Bill C-35 of the 44th Parliament",
+      })
       .click();
   }
 
@@ -115,6 +120,10 @@ export class ChatPage {
       throw new Error(`Model with id ${chatModelId} not found`);
     }
 
+    // Wait for model selector to be visible before clicking
+    await this.page
+      .getByTestId("model-selector")
+      .waitFor({ state: "visible", timeout: 30_000 });
     await this.page.getByTestId("model-selector").click();
     await this.page.getByTestId(`model-selector-item-${chatModelId}`).click();
     expect(await this.getSelectedModel()).toBe(chatModel.name);
@@ -142,7 +151,7 @@ export class ChatPage {
     const lastMessageElement = messageElements.at(-1);
 
     if (!lastMessageElement) {
-      return null;
+      throw new Error("No assistant message found");
     }
 
     const content = await lastMessageElement
@@ -151,12 +160,12 @@ export class ChatPage {
       .catch(() => null);
 
     const reasoningElement = await lastMessageElement
-      .getByTestId("message-reasoning")
+      .getByTestId("message-reasoning-content")
       .isVisible()
       .then(async (visible) =>
         visible
           ? await lastMessageElement
-              .getByTestId("message-reasoning")
+              .getByTestId("message-reasoning-content")
               .innerText()
           : null
       )

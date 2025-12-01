@@ -49,7 +49,9 @@ function PureArtifactMessages({
           isLoading={status === "streaming" && index === messages.length - 1}
           isReadonly={isReadonly}
           key={message.id}
+          legislationContext={null}
           message={message}
+          parliamentContext={null}
           regenerate={regenerate}
           requiresScrollPadding={
             hasSentMessage && index === messages.length - 1
