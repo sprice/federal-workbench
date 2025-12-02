@@ -82,7 +82,7 @@ There are two RAG systems in this project:
 
 ## Tools To Use During Development
 
-After completing feature code always run `pnpm check` to lint and type check.
+- `pnpm check` - Run this after creating code. Lint and type checking.
 
 ## Coding Style & Naming Conventions
 

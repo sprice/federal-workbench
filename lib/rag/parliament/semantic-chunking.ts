@@ -9,6 +9,10 @@
  * 1. Keeping related content together
  * 2. Adding contextual headers so chunks are self-contained
  * 3. Breaking at meaningful boundaries (not mid-sentence)
+ *
+ * IMPORTANT: Regex patterns with /g flag are stateful (lastIndex persists).
+ * Always reset lastIndex = 0 before reusing patterns in loops.
+ * See chunkBill() for the correct pattern.
  */
 
 import {
@@ -19,6 +23,14 @@ import {
 
 // Regex for paragraph splitting (defined at module level for performance)
 const PARAGRAPH_SPLIT_REGEX = /\n\n+/;
+
+/**
+ * Minimum characters before first section marker to consider as header content.
+ * Bill headers typically contain Parliament, Session, Bill number, and title info
+ * which are 300-500+ characters. Using 50 to capture meaningful headers while
+ * ignoring trivial whitespace.
+ */
+const MIN_HEADER_LENGTH = 50;
 
 /**
  * Extended chunk with optional section context
@@ -78,8 +90,10 @@ export function chunkBill(
 
   const cleanText = text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n");
 
-  // Define section markers in order of precedence
+  // Define section markers for both EN and FR bills
+  // Case-insensitive (gim) where casing varies in source documents
   const sectionMarkers = [
+    // EN patterns
     { pattern: /^(PART\s+\d+(?:\s+.+)?)\s*$/gm, type: "PART" },
     { pattern: /^(DIVISION\s+\d+(?:\s+.+)?)\s*$/gm, type: "DIVISION" },
     { pattern: /^(SCHEDULE\s*\d*)\s*$/gim, type: "SCHEDULE" },
@@ -88,6 +102,20 @@ export function chunkBill(
     { pattern: /^(TABLE OF PROVISIONS)\s*$/gm, type: "TABLE" },
     { pattern: /^(SHORT TITLE)\s*$/gm, type: "SHORT_TITLE" },
     { pattern: /^(INTERPRETATION)\s*$/gm, type: "INTERPRETATION" },
+    { pattern: /^(Preamble)\s*$/gim, type: "PREAMBLE" },
+    // FR patterns
+    { pattern: /^(PARTIE\s+\d+(?:\s+.+)?)\s*$/gm, type: "PART" },
+    { pattern: /^(SECTION\s+\d+(?:\s+.+)?)\s*$/gm, type: "DIVISION" },
+    { pattern: /^(ANNEXE\s*\d*)\s*$/gim, type: "SCHEDULE" },
+    { pattern: /^(SOMMAIRE)\s*$/gm, type: "SUMMARY" },
+    { pattern: /^(RECOMMANDATION)\s*$/gm, type: "RECOMMENDATION" },
+    { pattern: /^(TABLE ANALYTIQUE)\s*$/gm, type: "TABLE" },
+    { pattern: /^(TITRE ABRÉGÉ)\s*$/gm, type: "SHORT_TITLE" },
+    {
+      pattern: /^(DÉFINITIONS(?:\s+ET\s+INTERPRÉTATION)?)\s*$/gim,
+      type: "INTERPRETATION",
+    },
+    { pattern: /^(Préambule)\s*$/gim, type: "PREAMBLE" },
   ];
 
   // Find all section boundaries
@@ -118,15 +146,15 @@ export function chunkBill(
 
   const chunks: SemanticChunk[] = [];
 
-  // Handle content before first section (header, preamble)
-  if (boundaries[0].index > 100) {
+  // Handle content before first section (Parliament, Session, Bill number, title)
+  if (boundaries[0].index > MIN_HEADER_LENGTH) {
     const headerContent = cleanText.slice(0, boundaries[0].index).trim();
     if (headerContent) {
       const headerChunks = chunkWithContext(
         headerContent,
         context,
         language,
-        "PREAMBLE"
+        "HEADER"
       );
       chunks.push(...headerChunks);
     }

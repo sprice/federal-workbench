@@ -4,7 +4,7 @@
  * Contains all RAG-related tables for parliament and legislation embeddings.
  */
 
-import type { InferSelectModel } from "drizzle-orm";
+import { type InferSelectModel, sql } from "drizzle-orm";
 import {
   customType,
   index,
@@ -13,6 +13,7 @@ import {
   pgSchema,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
   vector,
 } from "drizzle-orm/pg-core";
@@ -60,10 +61,26 @@ export type ResourceMetadata = {
   // Bill-specific
   billNumber?: string; // e.g., "C-11", "S-203"
   billTitle?: string; // localized title for display
+  billSection?: string; // section label from semantic chunking (e.g., "PART 1", "SUMMARY")
 
   // Hansard-specific
   documentId?: number; // hansards_document.id
   statementId?: number; // hansards_statement.id
+  billDebatedId?: number; // hansards_statement.bill_debated_id
+  /**
+   * Parliamentary debate stage for bill discussions.
+   * Valid values (from Open Parliament data):
+   * - "1R" = First Reading
+   * - "2R" = Second Reading
+   * - "C" = Committee Stage
+   * - "R" = Report Stage
+   * - "3R" = Third Reading
+   * - Empty string = not a bill debate or stage not specified
+   *
+   * Source: hansards_statement.bill_debate_stage (varchar(10))
+   */
+  billDebateStage?: string;
+  writtenQuestion?: string; // hansards_statement.written_question
 
   // Committee-specific
   committeeId?: number; // committees_committee.id
@@ -75,6 +92,7 @@ export type ResourceMetadata = {
   voteNumber?: number; // bills_votequestion.number (used for ourcommons.ca URLs)
   partyId?: number; // core_party.id
   politicianId?: number; // core_politician.id
+  memberId?: number; // core_electedmember.id
 
   // Elections
   electionId?: number; // elections_election.id
@@ -93,7 +111,11 @@ export type ResourceMetadata = {
   ridingNameEn?: string;
   ridingNameFr?: string;
   province?: string; // two-letter province code for ridings
+  edid?: number;
   politicianName?: string;
+  nameGiven?: string;
+  nameFamily?: string;
+  gender?: string;
   speakerNameEn?: string;
   speakerNameFr?: string;
   // Party/committee naming
@@ -140,6 +162,14 @@ export const parlResources = ragSchema.table(
   (table) => [
     // JSONB GIN index for fast containment queries on metadata
     index("parl_resources_metadata_gin").using("gin", table.metadata),
+    // Unique constraint on (sourceType, sourceId, language, chunkIndex) for idempotency
+    // Prevents duplicate embeddings when re-running the embedding generator
+    uniqueIndex("parl_resources_source_unique").on(
+      sql`(metadata->>'sourceType')`,
+      sql`(metadata->>'sourceId')`,
+      sql`(metadata->>'language')`,
+      sql`COALESCE((metadata->>'chunkIndex')::int, 0)`
+    ),
   ]
 );
 
