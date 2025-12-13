@@ -41,7 +41,8 @@ test.describe("Regulation Recommendation/Notice extraction", () => {
       publicationRequirement: undefined,
     });
     expect(rec?.sourceSections).toEqual(["7"]);
-    expect(rec?.contentHtml).toContain('<a class="xref">');
+    // XRefInternal elements now render with xref-internal class and href
+    expect(rec?.contentHtml).toContain('class="xref');
   });
 
   test("captures Notice blocks with publication requirement, footnotes, and section linkage", () => {

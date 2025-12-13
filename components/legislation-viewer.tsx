@@ -1,12 +1,33 @@
 "use client";
 
+import parse from "html-react-parser";
+import {
+  CheckCircle2Icon,
+  ChevronRightIcon,
+  CircleIcon,
+  ExternalLinkIcon,
+  FileTextIcon,
+  HistoryIcon,
+  InfoIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActMetadata,
   SectionContent,
   SectionTocItem,
 } from "@/app/(chat)/api/legislation/sections/route";
+import type {
+  FootnoteInfo,
+  HistoricalNoteItem,
+} from "@/lib/db/legislation/queries";
+import {
+  buildAnnualStatuteUrl,
+  buildPointInTimeIndexUrl,
+  parseAmendmentCitation,
+} from "@/lib/legislation/constants";
+import type { ContentNode } from "@/lib/legislation/types";
 import { cn } from "@/lib/utils";
+import { ContentTreeRenderer } from "./content-tree-renderer";
 
 type LegislationViewerProps = {
   actId: string;
@@ -29,19 +50,427 @@ type DisplaySection = LoadedSection | PlaceholderSection;
 const REPEALED_PATTERN = /^\d+(?:\.\d+)?\s*\[(?:Repealed|Abrogé)/i;
 // Pattern to extract just the citation part
 const REPEALED_CITATION_PATTERN = /\[(Repealed|Abrogé)[^\]]+\]/i;
+// Pattern to extract section number from internal reference targets
+const SECTION_TARGET_PATTERN = /(?:section_?)?(\d+(?:\.\d+)?)/i;
 
-function SectionContentDisplay({ content }: { content: string }) {
-  // Check if this is a repealed section (content is just the repealed citation)
+function SectionContentDisplay({
+  content,
+  contentHtml,
+  contentTree,
+  language,
+  onNavigate,
+}: {
+  content: string;
+  contentHtml: string | null;
+  contentTree: ContentNode[] | null;
+  language: "en" | "fr";
+  onNavigate?: (target: string) => void;
+}) {
+  // Handle repealed sections with a clean citation
   if (REPEALED_PATTERN.test(content)) {
-    // Extract just the repealed citation part, removing the section label prefix
     const citationMatch = content.match(REPEALED_CITATION_PATTERN);
     const citation = citationMatch ? citationMatch[0] : content;
     return <p className="text-muted-foreground italic">{citation}</p>;
   }
 
+  // Prefer contentTree when available (structured React rendering)
+  if (contentTree && contentTree.length > 0) {
+    return (
+      <div className="legislation-content prose prose-sm dark:prose-invert max-w-none">
+        <ContentTreeRenderer
+          language={language}
+          nodes={contentTree}
+          onNavigate={onNavigate}
+        />
+      </div>
+    );
+  }
+
+  // Fallback to contentHtml (HTML string parsing)
+  if (contentHtml) {
+    return (
+      <div className="legislation-content prose prose-sm dark:prose-invert max-w-none">
+        {parse(contentHtml)}
+      </div>
+    );
+  }
+
+  // Plain text fallback
   return (
     <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap">
       {content}
+    </div>
+  );
+}
+
+function formatDate(dateStr: string): string {
+  try {
+    return new Date(dateStr).toLocaleDateString("en-CA");
+  } catch {
+    return dateStr;
+  }
+}
+
+/**
+ * Hierarchy breadcrumb - shows the Part/Division path above section
+ * Provides "where am I in this document?" context
+ */
+function HierarchyBreadcrumb({
+  path,
+  language,
+}: {
+  path: string[] | null;
+  language: "en" | "fr";
+}) {
+  if (!path || path.length === 0) {
+    return null;
+  }
+
+  return (
+    <nav
+      aria-label={language === "fr" ? "Fil d'Ariane" : "Breadcrumb"}
+      className="mb-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-muted-foreground text-xs"
+    >
+      {path.map((item, index) => (
+        <span className="inline-flex items-center gap-1" key={item}>
+          {index > 0 && (
+            <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/50" />
+          )}
+          <span>{item}</span>
+        </span>
+      ))}
+    </nav>
+  );
+}
+
+/**
+ * Status and type badges for sections
+ * Shows status (repealed, not-in-force) and special section types (amending, transitional)
+ */
+function SectionBadges({
+  status,
+  sectionType,
+  language,
+}: {
+  status: string | null;
+  sectionType: string | null;
+  language: "en" | "fr";
+}) {
+  const badges: Array<{ label: string; className: string }> = [];
+
+  // Status badges (only for non-default states)
+  if (status === "repealed") {
+    badges.push({
+      label: language === "fr" ? "Abrogé" : "Repealed",
+      className: "bg-destructive/10 text-destructive",
+    });
+  } else if (status === "not-in-force") {
+    badges.push({
+      label: language === "fr" ? "Non en vigueur" : "Not in Force",
+      className: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+    });
+  }
+
+  // Section type badges (only for special types)
+  if (sectionType === "amending") {
+    badges.push({
+      label: language === "fr" ? "Modificatif" : "Amending",
+      className: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+    });
+  } else if (sectionType === "transitional") {
+    badges.push({
+      label: language === "fr" ? "Transitoire" : "Transitional",
+      className: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+    });
+  }
+
+  if (badges.length === 0) {
+    return null;
+  }
+
+  return (
+    <span className="ml-2 inline-flex gap-1.5">
+      {badges.map((badge) => (
+        <span
+          className={cn(
+            "inline-flex items-center rounded-full px-2 py-0.5 font-medium text-xs",
+            badge.className
+          )}
+          key={badge.label}
+        >
+          {badge.label}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * Footnotes display - shows editorial notes and footnotes at end of section
+ */
+function FootnotesDisplay({
+  footnotes,
+  language,
+}: {
+  footnotes: FootnoteInfo[] | null;
+  language: "en" | "fr";
+}) {
+  if (!footnotes || footnotes.length === 0) {
+    return null;
+  }
+
+  return (
+    <aside className="mt-4 border-muted border-t pt-3">
+      <div className="flex items-center gap-1.5 text-muted-foreground text-xs">
+        <InfoIcon className="size-3.5" />
+        <span className="font-medium">
+          {language === "fr" ? "Notes" : "Notes"}
+        </span>
+      </div>
+      <ul className="mt-2 space-y-1.5 text-muted-foreground text-xs">
+        {footnotes.map((note) => (
+          <li className="flex gap-2" key={note.id}>
+            {note.label && (
+              <span className="shrink-0 font-semibold">{note.label}</span>
+            )}
+            <span>{note.text}</span>
+          </li>
+        ))}
+      </ul>
+    </aside>
+  );
+}
+
+/**
+ * Amendment timeline entry - interactive link to Justice Canada
+ * Current version (isLatest) has no link; historical versions link to amending act
+ */
+function AmendmentTimelineEntry({
+  note,
+  isLatest,
+  language,
+}: {
+  note: HistoricalNoteItem;
+  isLatest: boolean;
+  language: "en" | "fr";
+}) {
+  const parsed = parseAmendmentCitation(note.text);
+
+  // For historical versions, link to the amending act (annual statute) on Justice Canada
+  // Current version has no link (user is already viewing it)
+  const amendingActUrl =
+    !isLatest && parsed
+      ? buildAnnualStatuteUrl(parsed.year, parsed.chapter, language)
+      : null;
+
+  const isOriginal = note.type === "original";
+  const typeLabel = isOriginal
+    ? language === "fr"
+      ? "Version initiale"
+      : "Original"
+    : language === "fr"
+      ? "Modification"
+      : "Amendment";
+
+  return (
+    <div className="group relative flex items-start gap-3">
+      {/* Timeline dot */}
+      <div className="relative flex flex-col items-center">
+        {isLatest ? (
+          <CheckCircle2Icon className="size-4 shrink-0 text-primary" />
+        ) : (
+          <CircleIcon className="size-4 shrink-0 text-muted-foreground/50" />
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 pb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Current version: plain text; Historical: link to amending act */}
+          {amendingActUrl ? (
+            <a
+              className="inline-flex items-center gap-1 font-medium text-foreground hover:text-primary hover:underline"
+              href={amendingActUrl}
+              rel="noopener noreferrer"
+              target="_blank"
+              title={
+                language === "fr"
+                  ? `Voir la loi modificative de ${parsed?.year}`
+                  : `View ${parsed?.year} amending act`
+              }
+            >
+              {note.text}
+              <ExternalLinkIcon className="size-3 opacity-50 group-hover:opacity-100" />
+            </a>
+          ) : (
+            <span className="font-medium text-foreground">{note.text}</span>
+          )}
+
+          {/* Type badge */}
+          <span
+            className={cn(
+              "inline-flex items-center rounded-full px-2 py-0.5 font-medium text-[10px]",
+              isLatest
+                ? "bg-primary/10 text-primary"
+                : "bg-muted text-muted-foreground"
+            )}
+          >
+            {isLatest
+              ? language === "fr"
+                ? "Actuelle"
+                : "Current"
+              : typeLabel}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SectionMetadataStrip({
+  actId,
+  enactedDate,
+  inForceStartDate,
+  lastAmendedDate,
+  historicalNotes,
+  language,
+}: {
+  actId: string;
+  enactedDate: string | null;
+  inForceStartDate: string | null;
+  lastAmendedDate: string | null;
+  historicalNotes: HistoricalNoteItem[] | null;
+  language: "en" | "fr";
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const hasMetadata = enactedDate || inForceStartDate || lastAmendedDate;
+  const hasHistory = historicalNotes && historicalNotes.length > 0;
+
+  if (!hasMetadata && !hasHistory) {
+    return null;
+  }
+
+  // Determine which dates to show (avoid redundancy)
+  const showEnacted = enactedDate && enactedDate !== inForceStartDate;
+  const showInForce = inForceStartDate;
+  const showAmended = lastAmendedDate && lastAmendedDate !== inForceStartDate;
+
+  const labels = {
+    enacted: language === "fr" ? "Adopté" : "Enacted",
+    inForce: language === "fr" ? "En vigueur" : "In force",
+    amended: language === "fr" ? "Modifié" : "Amended",
+    history: language === "fr" ? "Historique" : "History",
+    versions:
+      language === "fr"
+        ? `${historicalNotes?.length} version${historicalNotes && historicalNotes.length > 1 ? "s" : ""}`
+        : `${historicalNotes?.length} version${historicalNotes && historicalNotes.length > 1 ? "s" : ""}`,
+  };
+
+  // Sort notes by citation year (most recent first) for timeline display
+  // The inForceStartDate can be the same for all entries (when they were
+  // added to the current consolidation), so we parse the year from the
+  // citation text to get the actual chronological order
+  const sortedNotes = hasHistory
+    ? [...historicalNotes].sort((a, b) => {
+        const yearA = parseAmendmentCitation(a.text)?.year || 0;
+        const yearB = parseAmendmentCitation(b.text)?.year || 0;
+        return yearB - yearA; // Most recent first
+      })
+    : [];
+
+  const pitUrl = buildPointInTimeIndexUrl(actId, language);
+
+  return (
+    <div className="mb-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground text-xs">
+        {showEnacted && (
+          <span>
+            {labels.enacted}: {formatDate(enactedDate)}
+          </span>
+        )}
+        {showEnacted && showInForce && <span className="text-border">·</span>}
+        {showInForce && (
+          <span>
+            {labels.inForce}: {formatDate(inForceStartDate)}
+          </span>
+        )}
+        {(showEnacted || showInForce) && showAmended && (
+          <span className="text-border">·</span>
+        )}
+        {showAmended && (
+          <span>
+            {labels.amended}: {formatDate(lastAmendedDate)}
+          </span>
+        )}
+        {hasHistory && (
+          <button
+            aria-expanded={expanded}
+            className="ml-auto inline-flex items-center gap-1 text-primary hover:underline"
+            onClick={() => setExpanded(!expanded)}
+            type="button"
+          >
+            <HistoryIcon className="size-3" />
+            <span>{expanded ? labels.history : labels.versions}</span>
+          </button>
+        )}
+      </div>
+
+      {expanded && hasHistory && (
+        <div className="mt-3 rounded-lg border bg-card p-4">
+          {/* Header with version indicator and external link */}
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <FileTextIcon className="size-4 text-muted-foreground" />
+              <span className="font-medium text-sm">
+                {language === "fr"
+                  ? "Historique des modifications"
+                  : "Amendment History"}
+              </span>
+            </div>
+            <a
+              className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-muted-foreground text-xs hover:bg-muted/80 hover:text-foreground"
+              href={pitUrl}
+              rel="noopener noreferrer"
+              target="_blank"
+              title={
+                language === "fr"
+                  ? "Voir toutes les versions sur Justice Canada"
+                  : "View all versions on Justice Canada"
+              }
+            >
+              {language === "fr" ? "Toutes les versions" : "All versions"}
+              <ExternalLinkIcon className="size-3" />
+            </a>
+          </div>
+
+          {/* Timeline */}
+          <div className="relative">
+            {/* Vertical line */}
+            <div className="absolute top-2 bottom-2 left-[7px] w-px bg-border" />
+
+            {/* Entries */}
+            <div className="space-y-0">
+              {sortedNotes.map((note, index) => (
+                <AmendmentTimelineEntry
+                  isLatest={index === 0}
+                  key={`${note.text}-${note.enactedDate}-${index}`}
+                  language={language}
+                  note={note}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Footer note */}
+          <p className="mt-3 border-muted border-t pt-3 text-muted-foreground text-xs">
+            <InfoIcon className="mr-1 inline size-3" />
+            {language === "fr"
+              ? "Vous consultez la version consolidée actuelle. Cliquez sur une modification pour voir la loi modificative."
+              : "You are viewing the current consolidated version. Click an amendment to view the amending act."}
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -85,8 +514,8 @@ export function LegislationViewer({
   const contentRef = useRef<HTMLDivElement>(null);
   // Use a callback ref pattern to avoid O(n²) ref management
   const sectionRefCallback =
-    useRef<(order: number, el: HTMLDivElement | null) => void>();
-  const sectionElements = useRef<Map<number, HTMLDivElement>>(new Map());
+    useRef<(order: number, el: HTMLElement | null) => void>();
+  const sectionElements = useRef<Map<number, HTMLElement>>(new Map());
 
   // Track in-flight requests to prevent duplicates
   const pendingRequests = useRef<Set<string>>(new Set());
@@ -229,6 +658,29 @@ export function LegislationViewer({
     [toc, loadedSections, loadSectionRange, act?.language, language]
   );
 
+  // Handle internal cross-reference navigation (from XRefInternal in content)
+  const handleInternalNavigation = useCallback(
+    (target: string) => {
+      // Target could be like "section_4", "4", or a full lims ID
+      // Try to extract just the section number
+      const sectionMatch = target.match(SECTION_TARGET_PATTERN);
+      const sectionLabel = sectionMatch ? sectionMatch[1] : target;
+
+      // Find the section in TOC by label
+      const tocItem = toc.find(
+        (item) =>
+          item.sectionLabel === sectionLabel ||
+          item.sectionLabel === target ||
+          item.id === target
+      );
+
+      if (tocItem) {
+        handleSectionClick(tocItem.sectionOrder);
+      }
+    },
+    [toc, handleSectionClick]
+  );
+
   // Build display sections - combine TOC with loaded content
   // Use loadedSectionOrders for stable dependency tracking
   const displaySections: DisplaySection[] = useMemo(() => {
@@ -326,7 +778,7 @@ export function LegislationViewer({
 
   // Setup callback ref for efficient ref management
   useEffect(() => {
-    sectionRefCallback.current = (order: number, el: HTMLDivElement | null) => {
+    sectionRefCallback.current = (order: number, el: HTMLElement | null) => {
       if (el) {
         sectionElements.current.set(order, el);
       } else {
@@ -469,8 +921,10 @@ export function LegislationViewer({
         <div className="space-y-6">
           {displaySections.map((section) => {
             const HeaderTag = getSectionHeaderLevel(section.sectionType);
+            const isLoaded = section.loaded;
+
             return (
-              <div
+              <article
                 className={cn(
                   "scroll-mt-4",
                   selectedSectionOrder === section.sectionOrder &&
@@ -482,25 +936,61 @@ export function LegislationViewer({
                   sectionRefCallback.current?.(section.sectionOrder, el)
                 }
               >
+                {/* Hierarchy breadcrumb - shows Part/Division context */}
+                {isLoaded && (
+                  <HierarchyBreadcrumb
+                    language={usedLang}
+                    path={section.hierarchyPath}
+                  />
+                )}
+
+                {/* Section header with badges */}
                 <HeaderTag
                   className={cn(
-                    "font-semibold",
+                    "flex items-center font-semibold",
                     HeaderTag === "h2" ? "mb-2 text-xl" : "mb-1 text-lg"
                   )}
                 >
-                  {formatSectionHeader(section, usedLang)}
+                  <span>{formatSectionHeader(section, usedLang)}</span>
+                  {isLoaded && (
+                    <SectionBadges
+                      language={usedLang}
+                      sectionType={section.sectionType}
+                      status={section.status}
+                    />
+                  )}
                 </HeaderTag>
 
                 {section.status === "repealed" ? (
                   <p className="text-muted-foreground italic">
                     {usedLang === "fr" ? "Abrogé" : "Repealed"}
                   </p>
-                ) : section.loaded ? (
-                  <SectionContentDisplay content={section.content} />
+                ) : isLoaded ? (
+                  <div className="pt-2">
+                    <SectionMetadataStrip
+                      actId={actId}
+                      enactedDate={section.enactedDate}
+                      historicalNotes={section.historicalNotes}
+                      inForceStartDate={section.inForceStartDate}
+                      language={usedLang}
+                      lastAmendedDate={section.lastAmendedDate}
+                    />
+                    <SectionContentDisplay
+                      content={section.content}
+                      contentHtml={section.contentHtml}
+                      contentTree={section.contentTree}
+                      language={usedLang}
+                      onNavigate={handleInternalNavigation}
+                    />
+                    <FootnotesDisplay
+                      footnotes={section.footnotes}
+                      language={usedLang}
+                    />
+                  </div>
                 ) : (
                   <div className="h-20 animate-pulse rounded bg-muted" />
                 )}
-              </div>
+              </article>
             );
           })}
         </div>

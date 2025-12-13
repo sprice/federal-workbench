@@ -3,6 +3,103 @@
  */
 
 export type Language = "en" | "fr";
+
+/**
+ * A node in the content tree. Represents either text or an element with children.
+ * The array order in the database IS the document order.
+ * Used in the content_tree JSONB column for order-preserving content storage.
+ */
+export type ContentNode =
+  // Text content
+  | { type: "text"; value: string }
+  // Defined terms and references
+  | { type: "DefinedTermEn"; children: ContentNode[] }
+  | { type: "DefinedTermFr"; children: ContentNode[] }
+  | { type: "DefinitionRef"; children: ContentNode[] }
+  // Cross-references
+  | {
+      type: "XRefExternal";
+      link?: string;
+      refType?: string;
+      children: ContentNode[];
+    }
+  | { type: "XRefInternal"; target?: string; children: ContentNode[] }
+  // Text formatting
+  | {
+      type: "Emphasis";
+      style?: "italic" | "bold" | "smallcaps";
+      children: ContentNode[];
+    }
+  | { type: "Language"; lang?: string; children: ContentNode[] }
+  | { type: "Repealed"; children: ContentNode[] }
+  | { type: "FootnoteRef"; id?: string; children: ContentNode[] }
+  | { type: "Sup"; children: ContentNode[] }
+  | { type: "Sub"; children: ContentNode[] }
+  // Inline formatting elements
+  | { type: "LineBreak" }
+  | { type: "PageBreak" }
+  | { type: "FormBlank"; width?: string }
+  | { type: "Fraction"; children: ContentNode[] }
+  | { type: "Leader"; style?: "solid" | "dot" | "dash" }
+  | { type: "Separator" }
+  // Structure elements
+  | { type: "Label"; children: ContentNode[] }
+  | { type: "Text"; children: ContentNode[] }
+  | { type: "Subsection"; children: ContentNode[] }
+  | { type: "Paragraph"; children: ContentNode[] }
+  | { type: "Subparagraph"; children: ContentNode[] }
+  | { type: "Clause"; children: ContentNode[] }
+  | { type: "Subclause"; children: ContentNode[] }
+  | { type: "Definition"; children: ContentNode[] }
+  | { type: "List"; style?: string; children: ContentNode[] }
+  | { type: "Item"; children: ContentNode[] }
+  // Tables (CALS)
+  | {
+      type: "Table";
+      attrs?: Record<string, string>;
+      children: ContentNode[];
+    }
+  | { type: "TableGroup"; children: ContentNode[] }
+  | { type: "TGroup"; cols?: number; children: ContentNode[] }
+  | { type: "ColSpec"; colName?: string; colWidth?: string }
+  | { type: "THead"; children: ContentNode[] }
+  | { type: "TBody"; children: ContentNode[] }
+  | { type: "TFoot"; children: ContentNode[] }
+  | { type: "Row"; children: ContentNode[] }
+  | {
+      type: "Entry";
+      attrs?: Record<string, string>;
+      children: ContentNode[];
+    }
+  // Formulas and math
+  | { type: "Formula"; children: ContentNode[] }
+  | { type: "FormulaGroup"; children: ContentNode[] }
+  | { type: "FormulaText"; children: ContentNode[] }
+  | { type: "FormulaConnector"; children: ContentNode[] }
+  | { type: "FormulaDefinition"; children: ContentNode[] }
+  | { type: "FormulaTerm"; children: ContentNode[] }
+  | { type: "FormulaParagraph"; children: ContentNode[] }
+  // MathML - stored as raw XML for browser rendering
+  | { type: "MathML"; raw: string; display?: "block" | "inline" }
+  // Images
+  | { type: "ImageGroup"; children: ContentNode[] }
+  | { type: "Image"; source?: string }
+  | { type: "Caption"; children: ContentNode[] }
+  // Bilingual content
+  | { type: "BilingualGroup"; children: ContentNode[] }
+  | { type: "BilingualItemEn"; children: ContentNode[] }
+  | { type: "BilingualItemFr"; children: ContentNode[] }
+  // Special content
+  | { type: "QuotedText"; children: ContentNode[] }
+  | { type: "CenteredText"; children: ContentNode[] }
+  | { type: "Continued"; children: ContentNode[] }
+  | { type: "FormGroup"; children: ContentNode[] }
+  | { type: "Oath"; children: ContentNode[] }
+  | { type: "ReadAsText"; children: ContentNode[] }
+  | { type: "ScheduleFormHeading"; children: ContentNode[] }
+  | { type: "LeaderRightJustified"; children: ContentNode[] }
+  // Fallback for unhandled elements
+  | { type: "Unknown"; tag: string; children: ContentNode[] };
 export type LegislationType = "act" | "regulation";
 export type Status = "in-force" | "repealed" | "not-in-force";
 export type SectionType =
@@ -428,6 +525,7 @@ export type ParsedSection = {
   marginalNote?: string;
   content: string;
   contentHtml?: string; // HTML-formatted content preserving structure
+  contentTree?: ContentNode[]; // Ordered content tree for rendering (preserves document order)
   status: Status;
   // Section attributes from XML
   xmlType?: string; // "amending", "CIF", etc.

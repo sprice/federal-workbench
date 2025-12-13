@@ -309,7 +309,9 @@ test.describe("List parsing", () => {
     expect(contentHtml).toContain("<ul>");
     expect(contentHtml).toContain("<li>");
     expect(contentHtml).toContain("Criminal Code");
-    expect(contentHtml).toContain('<a class="xref">');
+    // XRefExternal now includes href to the linked legislation
+    expect(contentHtml).toContain('class="xref"');
+    expect(contentHtml).toContain('href="/legislation/act/C-46"');
   });
 
   test("handles Language elements in list items", () => {

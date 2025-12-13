@@ -14,6 +14,7 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
+import type { ContentNode } from "@/lib/legislation/types";
 
 export const legislationSchema = pgSchema("legislation");
 
@@ -544,6 +545,8 @@ export const sections = legislationSchema.table(
     content: text("content").notNull(),
     // HTML-formatted content (preserving structure like tables, emphasis)
     contentHtml: text("content_html"),
+    // Ordered content tree for rendering (preserves document order)
+    contentTree: jsonb("content_tree").$type<ContentNode[]>(),
     // Status of this specific section
     status: varchar("status", { length: 20 }).default("in-force"),
     // Section attributes (from XML)

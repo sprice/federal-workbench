@@ -1,8 +1,12 @@
 import "server-only";
 
 import { and, asc, eq, gte, lte } from "drizzle-orm";
+import type { ContentNode } from "@/lib/legislation/types";
 import { getDb } from "../connection";
+import type { FootnoteInfo, HistoricalNoteItem } from "./schema";
 import { acts, sections } from "./schema";
+
+export type { FootnoteInfo, HistoricalNoteItem } from "./schema";
 
 const MAX_SECTION_RANGE = 100;
 
@@ -28,14 +32,31 @@ export type ActMetadata = {
   language: string;
 };
 
+export type ContentFlags = {
+  hasTable?: boolean;
+  hasFormula?: boolean;
+  hasImage?: boolean;
+  hasRepealed?: boolean;
+  hasEditorialNote?: boolean;
+};
+
 export type SectionContent = {
   id: string;
   sectionLabel: string;
   marginalNote: string | null;
   content: string;
+  contentHtml: string | null;
+  contentTree: ContentNode[] | null;
   sectionType: string | null;
   sectionOrder: number;
   status: string | null;
+  hierarchyPath: string[] | null;
+  enactedDate: string | null;
+  inForceStartDate: string | null;
+  lastAmendedDate: string | null;
+  historicalNotes: HistoricalNoteItem[] | null;
+  footnotes: FootnoteInfo[] | null;
+  contentFlags: ContentFlags | null;
 };
 
 export type LegislationSectionsResponse = {
@@ -188,9 +209,18 @@ export function getSectionContentRange({
       sectionLabel: sections.sectionLabel,
       marginalNote: sections.marginalNote,
       content: sections.content,
+      contentHtml: sections.contentHtml,
+      contentTree: sections.contentTree,
       sectionType: sections.sectionType,
       sectionOrder: sections.sectionOrder,
       status: sections.status,
+      hierarchyPath: sections.hierarchyPath,
+      enactedDate: sections.enactedDate,
+      inForceStartDate: sections.inForceStartDate,
+      lastAmendedDate: sections.lastAmendedDate,
+      historicalNotes: sections.historicalNotes,
+      footnotes: sections.footnotes,
+      contentFlags: sections.contentFlags,
     })
     .from(sections)
     .where(

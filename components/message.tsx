@@ -7,11 +7,13 @@ import { useArtifact } from "@/hooks/use-artifact";
 import type { LegislationContextResult } from "@/lib/ai/tools/retrieve-legislation-context";
 import type { ParliamentContextResult } from "@/lib/ai/tools/retrieve-parliament-context";
 import type { Vote } from "@/lib/db/schema";
+import type { HydratedLegislationSource } from "@/lib/rag/legislation/hydrate";
 import type { ChatMessage } from "@/lib/types";
 import { cn, generateUUID, sanitizeText } from "@/lib/utils";
 import { DocumentToolResult } from "./document";
 import { DocumentPreview } from "./document-preview";
 import { Citations } from "./elements/citations";
+import { LegislationContextPanel } from "./elements/legislation-context-panel";
 import { MessageContent } from "./elements/message";
 import { Response } from "./elements/response";
 import {
@@ -225,31 +227,63 @@ const PurePreviewMessage = ({
     }
   }
 
-  async function openLegislationSourceArtifact(sourceType: string) {
+  async function openLegislationSourceArtifact(
+    source: HydratedLegislationSource
+  ) {
     try {
-      const ctx = latestLegislationContext;
-      const source = ctx?.hydratedSources.find(
-        (s) => s.sourceType === sourceType
-      );
-      if (!ctx || !source) {
-        return;
-      }
       const docId = generateUUID();
       const language = source.languageUsed || "en";
       const isFr = language === "fr";
-      // Parse id like "act-C-46" to get readable title
-      const actId = source.id.replace(REGEX_ACT_ID_PREFIX, "");
-      const title = isFr
-        ? `Loi — ${actId} — Texte intégral`
-        : `Act — ${actId} — Full Text`;
-      // Store actId and language as JSON for the legislation artifact
-      const content = JSON.stringify({ actId, language });
+
+      let title: string;
+      let content: string;
+      let kind: "legislation" | "text";
+
+      const { sourceType } = source;
+
+      if (sourceType === "act" || sourceType === "act_section") {
+        // Acts use the legislation viewer
+        const actId = source.id.replace(REGEX_ACT_ID_PREFIX, "");
+        title = isFr
+          ? `Loi — ${actId} — Texte intégral`
+          : `Act — ${actId} — Full Text`;
+        content = JSON.stringify({ actId, language });
+        kind = "legislation";
+      } else if (
+        sourceType === "regulation" ||
+        sourceType === "regulation_section"
+      ) {
+        // Regulations use text viewer with markdown
+        title = source.displayLabel ?? (isFr ? "Règlement" : "Regulation");
+        content = source.markdown;
+        kind = "text";
+      } else if (sourceType === "defined_term") {
+        // Defined terms use text viewer
+        const termLabel = source.term ? `"${source.term}"` : "";
+        title = isFr
+          ? `Définition — ${termLabel}`
+          : `Definition — ${termLabel}`;
+        content = source.markdown;
+        kind = "text";
+      } else if (sourceType === "cross_reference") {
+        // Cross-references use text viewer
+        title = isFr
+          ? `Renvoi — ${source.targetTitle ?? ""}`
+          : `Cross-reference — ${source.targetTitle ?? ""}`;
+        content = source.markdown;
+        kind = "text";
+      } else {
+        // Fallback for other source types
+        title = source.displayLabel ?? source.id;
+        content = source.markdown;
+        kind = "text";
+      }
 
       // Persist document so it survives refresh/versioning
       const res = await fetch(`/api/document?id=${docId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, title, kind: "legislation" }),
+        body: JSON.stringify({ content, title, kind }),
       });
       if (!res.ok) {
         console.error(
@@ -264,7 +298,7 @@ const PurePreviewMessage = ({
         ...a,
         documentId: docId,
         title,
-        kind: "legislation",
+        kind,
         content,
         isVisible: true,
         status: "idle",
@@ -276,10 +310,6 @@ const PurePreviewMessage = ({
 
   const billSource = latestParliamentContext?.hydratedSources?.find(
     (s) => s.sourceType === "bill"
-  );
-
-  const actSource = latestLegislationContext?.hydratedSources?.find(
-    (s) => s.sourceType === "act"
   );
 
   return (
@@ -559,19 +589,16 @@ const PurePreviewMessage = ({
               />
             )}
 
-          {!isLoading && message.role === "assistant" && actSource ? (
-            <div className="mt-2">
-              <Button
-                onClick={() => openLegislationSourceArtifact("act")}
-                size="sm"
-                variant="outline"
-              >
-                {latestLegislationContext?.language === "fr"
-                  ? "Afficher la loi"
-                  : "Show Act"}
-              </Button>
-            </div>
-          ) : null}
+          {!isLoading &&
+            message.role === "assistant" &&
+            latestLegislationContext?.hydratedSources &&
+            latestLegislationContext.hydratedSources.length > 0 && (
+              <LegislationContextPanel
+                hydratedSources={latestLegislationContext.hydratedSources}
+                language={latestLegislationContext.language}
+                onOpenSource={openLegislationSourceArtifact}
+              />
+            )}
 
           {!isReadonly && (
             <MessageActions
