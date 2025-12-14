@@ -32,6 +32,7 @@ import { Weather } from "./weather";
 
 // Regex patterns at top level for performance
 const REGEX_ACT_ID_PREFIX = /^act-/;
+const REGEX_REG_ID_PREFIX = /^reg-/;
 // Citation patterns with prefixes: [P1], [P2], [L1], [L2], etc.
 const REGEX_PARLIAMENT_CITATION = /\[P(\d+)\](?!\()/g;
 const REGEX_LEGISLATION_CITATION = /\[L(\d+)\](?!\()/g;
@@ -247,16 +248,23 @@ const PurePreviewMessage = ({
         title = isFr
           ? `Loi — ${actId} — Texte intégral`
           : `Act — ${actId} — Full Text`;
-        content = JSON.stringify({ actId, language });
+        content = JSON.stringify({ docType: "act", docId: actId, language });
         kind = "legislation";
       } else if (
         sourceType === "regulation" ||
         sourceType === "regulation_section"
       ) {
-        // Regulations use text viewer with markdown
-        title = source.displayLabel ?? (isFr ? "Règlement" : "Regulation");
-        content = source.markdown;
-        kind = "text";
+        // Regulations use the legislation viewer
+        const regulationId = source.id.replace(REGEX_REG_ID_PREFIX, "");
+        title = isFr
+          ? `Règlement — ${regulationId} — Texte intégral`
+          : `Regulation — ${regulationId} — Full Text`;
+        content = JSON.stringify({
+          docType: "regulation",
+          docId: regulationId,
+          language,
+        });
+        kind = "legislation";
       } else if (sourceType === "defined_term") {
         // Defined terms use text viewer
         const termLabel = source.term ? `"${source.term}"` : "";

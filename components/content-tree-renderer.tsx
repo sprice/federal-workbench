@@ -1,7 +1,7 @@
 import parse from "html-react-parser";
 import { ExternalLinkIcon } from "lucide-react";
 import Image from "next/image";
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import { buildJusticeCanadaUrl } from "@/lib/legislation/constants";
 import type { ContentNode } from "@/lib/legislation/types";
 
@@ -147,24 +147,33 @@ function renderNode(
         </span>
       );
     case "XRefExternal": {
-      const href = node.link
-        ? buildJusticeCanadaUrl(
-            node.link,
-            node.refType === "regulation" ? "regulation" : "act",
-            language as "en" | "fr"
-          )
-        : "#";
+      // Only create links for acts/regulations that have a valid link attribute
+      // External references like "Designated Airspace Handbook" (reference-type="other")
+      // don't have links and should render as styled text, not broken anchors
+      if (node.link) {
+        const href = buildJusticeCanadaUrl(
+          node.link,
+          node.refType === "regulation" ? "regulation" : "act",
+          language as "en" | "fr"
+        );
+        return (
+          <a
+            className="inline-flex items-center gap-1 text-primary underline hover:text-primary/80"
+            href={href}
+            key={key}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            {children}
+            <ExternalLinkIcon className="size-3 shrink-0" />
+          </a>
+        );
+      }
+      // No link available - render as emphasized text (external publications, standards)
       return (
-        <a
-          className="inline-flex items-center gap-1 text-primary underline hover:text-primary/80"
-          href={href}
-          key={key}
-          rel="noopener noreferrer"
-          target="_blank"
-        >
+        <em className="text-foreground" key={key}>
           {children}
-          <ExternalLinkIcon className="size-3 shrink-0" />
-        </a>
+        </em>
       );
     }
     case "XRefInternal": {
@@ -311,7 +320,7 @@ function renderNode(
         </table>
       );
     case "TGroup":
-      return <>{children}</>;
+      return <React.Fragment key={key}>{children}</React.Fragment>;
     case "THead":
       return (
         <thead className="bg-muted" key={key}>

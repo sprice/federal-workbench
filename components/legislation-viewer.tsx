@@ -13,6 +13,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActMetadata,
+  RegulationMetadata,
   SectionContent,
   SectionTocItem,
 } from "@/app/(chat)/api/legislation/sections/route";
@@ -22,6 +23,7 @@ import type {
 } from "@/lib/db/legislation/queries";
 import {
   buildAnnualStatuteUrl,
+  buildJusticeCanadaUrl,
   buildPointInTimeIndexUrl,
   parseAmendmentCitation,
 } from "@/lib/legislation/constants";
@@ -29,8 +31,15 @@ import type { ContentNode } from "@/lib/legislation/types";
 import { cn } from "@/lib/utils";
 import { ContentTreeRenderer } from "./content-tree-renderer";
 
+// @TODO: Make this Defined Terms dropdown better
+// import { DefinedTermsPanel } from "./defined-terms-panel";
+
+type DocType = "act" | "regulation";
+type DocumentMetadata = ActMetadata | RegulationMetadata;
+
 type LegislationViewerProps = {
-  actId: string;
+  docType: DocType;
+  docId: string;
   language: "en" | "fr";
   isLoading?: boolean;
 };
@@ -328,14 +337,16 @@ function AmendmentTimelineEntry({
 }
 
 function SectionMetadataStrip({
-  actId,
+  docType,
+  docId,
   enactedDate,
   inForceStartDate,
   lastAmendedDate,
   historicalNotes,
   language,
 }: {
-  actId: string;
+  docType: DocType;
+  docId: string;
   enactedDate: string | null;
   inForceStartDate: string | null;
   lastAmendedDate: string | null;
@@ -379,7 +390,9 @@ function SectionMetadataStrip({
       })
     : [];
 
-  const pitUrl = buildPointInTimeIndexUrl(actId, language);
+  // Point-in-time URL only available for acts
+  const pitUrl =
+    docType === "act" ? buildPointInTimeIndexUrl(docId, language) : null;
 
   return (
     <div className="mb-3">
@@ -428,20 +441,22 @@ function SectionMetadataStrip({
                   : "Amendment History"}
               </span>
             </div>
-            <a
-              className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-muted-foreground text-xs hover:bg-muted/80 hover:text-foreground"
-              href={pitUrl}
-              rel="noopener noreferrer"
-              target="_blank"
-              title={
-                language === "fr"
-                  ? "Voir toutes les versions sur Justice Canada"
-                  : "View all versions on Justice Canada"
-              }
-            >
-              {language === "fr" ? "Toutes les versions" : "All versions"}
-              <ExternalLinkIcon className="size-3" />
-            </a>
+            {pitUrl && (
+              <a
+                className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-muted-foreground text-xs hover:bg-muted/80 hover:text-foreground"
+                href={pitUrl}
+                rel="noopener noreferrer"
+                target="_blank"
+                title={
+                  language === "fr"
+                    ? "Voir toutes les versions sur Justice Canada"
+                    : "View all versions on Justice Canada"
+                }
+              >
+                {language === "fr" ? "Toutes les versions" : "All versions"}
+                <ExternalLinkIcon className="size-3" />
+              </a>
+            )}
           </div>
 
           {/* Timeline */}
@@ -475,17 +490,26 @@ function SectionMetadataStrip({
   );
 }
 
+type FetchSectionContentParams = {
+  docType: DocType;
+  docId: string;
+  lang: string;
+  startOrder: number;
+  endOrder: number;
+};
+
 /**
  * Fetch section content for a range of sections.
  */
-async function fetchSectionContent(
-  actId: string,
-  lang: string,
-  startOrder: number,
-  endOrder: number
-): Promise<SectionContent[]> {
+async function fetchSectionContent({
+  docType,
+  docId,
+  lang,
+  startOrder,
+  endOrder,
+}: FetchSectionContentParams): Promise<SectionContent[]> {
   const res = await fetch(
-    `/api/legislation/section-content?actId=${encodeURIComponent(actId)}&language=${lang}&startOrder=${startOrder}&endOrder=${endOrder}`
+    `/api/legislation/section-content?docType=${docType}&docId=${encodeURIComponent(docId)}&language=${lang}&startOrder=${startOrder}&endOrder=${endOrder}`
   );
   if (!res.ok) {
     throw new Error(`Failed to fetch section content: ${res.status}`);
@@ -495,11 +519,12 @@ async function fetchSectionContent(
 }
 
 export function LegislationViewer({
-  actId,
+  docType,
+  docId,
   language,
   isLoading: externalLoading,
 }: LegislationViewerProps) {
-  const [act, setAct] = useState<ActMetadata | null>(null);
+  const [metadata, setMetadata] = useState<DocumentMetadata | null>(null);
   const [toc, setToc] = useState<SectionTocItem[]>([]);
   const [loadedSections, setLoadedSections] = useState<
     Map<number, SectionContent>
@@ -537,13 +562,14 @@ export function LegislationViewer({
       setError(null);
       try {
         const res = await fetch(
-          `/api/legislation/sections?actId=${encodeURIComponent(actId)}&language=${language}`
+          `/api/legislation/sections?docType=${docType}&docId=${encodeURIComponent(docId)}&language=${language}`
         );
         if (!res.ok) {
           throw new Error(`Failed to fetch sections: ${res.status}`);
         }
         const data = await res.json();
-        setAct(data.act);
+        // Set metadata (either act or regulation)
+        setMetadata(data.act || data.regulation);
         setToc(data.toc);
 
         // Load initial sections inline
@@ -556,14 +582,16 @@ export function LegislationViewer({
             lastSection?.sectionOrder ?? 0
           );
 
+          const docLang = (data.act || data.regulation)?.language || language;
           setIsLoadingContent(true);
           try {
-            const sections = await fetchSectionContent(
-              actId,
-              data.act.language || language,
-              data.toc[0].sectionOrder,
-              endOrder
-            );
+            const sections = await fetchSectionContent({
+              docType,
+              docId,
+              lang: docLang,
+              startOrder: data.toc[0].sectionOrder,
+              endOrder,
+            });
             setLoadedSections((prev) => {
               const next = new Map(prev);
               for (const section of sections) {
@@ -576,13 +604,16 @@ export function LegislationViewer({
           }
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load act");
+        const label = docType === "regulation" ? "regulation" : "act";
+        setError(
+          err instanceof Error ? err.message : `Failed to load ${label}`
+        );
       } finally {
         setIsLoadingToc(false);
       }
     }
     fetchToc();
-  }, [actId, language]);
+  }, [docType, docId, language]);
 
   const loadSectionRange = useCallback(
     async (startOrder: number, endOrder: number, lang: string) => {
@@ -595,12 +626,13 @@ export function LegislationViewer({
       setIsLoadingContent(true);
 
       try {
-        const sections = await fetchSectionContent(
-          actId,
+        const sections = await fetchSectionContent({
+          docType,
+          docId,
           lang,
           startOrder,
-          endOrder
-        );
+          endOrder,
+        });
         setLoadedSections((prev) => {
           const next = new Map(prev);
           for (const section of sections) {
@@ -615,36 +647,49 @@ export function LegislationViewer({
         setIsLoadingContent(false);
       }
     },
-    [actId]
+    [docType, docId]
   );
 
   const handleSectionClick = useCallback(
     async (sectionOrder: number) => {
       setSelectedSectionOrder(sectionOrder);
 
-      // Calculate range to load (target section + buffer on each side)
       const tocIndex = toc.findIndex((s) => s.sectionOrder === sectionOrder);
       if (tocIndex === -1) {
         return;
       }
 
-      const startIndex = Math.max(0, tocIndex - SECTION_BUFFER);
+      // Find the first unloaded section between start and target + buffer
+      // We need ALL sections above the target loaded to ensure accurate scroll position
       const endIndex = Math.min(toc.length - 1, tocIndex + SECTION_BUFFER);
 
-      // Check which sections in range are not loaded
-      const needToLoad: number[] = [];
-      for (let i = startIndex; i <= endIndex; i++) {
+      // Find first unloaded section
+      let firstUnloadedIndex = -1;
+      for (let i = 0; i <= endIndex; i++) {
         if (!loadedSections.has(toc[i].sectionOrder)) {
-          needToLoad.push(toc[i].sectionOrder);
+          firstUnloadedIndex = i;
+          break;
         }
       }
 
-      if (needToLoad.length > 0) {
-        await loadSectionRange(
-          Math.min(...needToLoad),
-          Math.max(...needToLoad),
-          act?.language || language
-        );
+      // Load all sections from first unloaded to target + buffer
+      // Chunk into batches of 100 (API limit)
+      if (firstUnloadedIndex !== -1) {
+        const lang = metadata?.language || language;
+        const CHUNK_SIZE = 100;
+
+        for (
+          let chunkStart = firstUnloadedIndex;
+          chunkStart <= endIndex;
+          chunkStart += CHUNK_SIZE
+        ) {
+          const chunkEnd = Math.min(chunkStart + CHUNK_SIZE - 1, endIndex);
+          await loadSectionRange(
+            toc[chunkStart].sectionOrder,
+            toc[chunkEnd].sectionOrder,
+            lang
+          );
+        }
       }
 
       // Scroll to section after content loads
@@ -655,7 +700,7 @@ export function LegislationViewer({
         }
       });
     },
-    [toc, loadedSections, loadSectionRange, act?.language, language]
+    [toc, loadedSections, loadSectionRange, metadata?.language, language]
   );
 
   // Handle internal cross-reference navigation (from XRefInternal in content)
@@ -720,11 +765,11 @@ export function LegislationViewer({
         loadSectionRange(
           toc[startIndex].sectionOrder,
           toc[endIndex].sectionOrder,
-          act?.language || language
+          metadata?.language || language
         );
       }
     }
-  }, [toc, loadedSections, loadSectionRange, act?.language, language]);
+  }, [toc, loadedSections, loadSectionRange, metadata?.language, language]);
 
   // Intersection observer for lazy loading as user scrolls
   useEffect(() => {
@@ -812,9 +857,10 @@ export function LegislationViewer({
   };
 
   if (externalLoading || isLoadingToc) {
+    const label = docType === "regulation" ? "regulation" : "act";
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-muted-foreground">Loading act...</div>
+        <div className="text-muted-foreground">Loading {label}...</div>
       </div>
     );
   }
@@ -827,11 +873,14 @@ export function LegislationViewer({
     );
   }
 
-  if (!act) {
+  if (!metadata) {
     return null;
   }
 
-  const usedLang = (act.language as "en" | "fr") || language;
+  const usedLang = (metadata.language as "en" | "fr") || language;
+  const isRegulation = docType === "regulation";
+  const reg = isRegulation ? (metadata as RegulationMetadata) : null;
+  const act = isRegulation ? null : (metadata as ActMetadata);
 
   return (
     <div className="flex h-full flex-row">
@@ -882,22 +931,44 @@ export function LegislationViewer({
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto p-6" ref={contentRef}>
-        {/* Act Header */}
+        {/* Document Header */}
         <header className="mb-8">
-          <h1 className="font-bold text-2xl">{act.title}</h1>
-          {act.longTitle && act.longTitle !== act.title && (
+          <h1 className="font-bold text-2xl">{metadata.title}</h1>
+          {metadata.longTitle && metadata.longTitle !== metadata.title && (
             <p className="mt-1 text-lg text-muted-foreground italic">
-              {act.longTitle}
+              {metadata.longTitle}
             </p>
           )}
-          <div className="mt-4 flex gap-4 text-muted-foreground text-sm">
-            {act.status && (
+
+          {/* Regulation-specific header info */}
+          {isRegulation && reg && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-0.5 font-medium text-blue-700 text-xs dark:text-blue-400">
+                {reg.instrumentNumber}
+              </span>
+              {reg.regulationType && (
+                <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground text-xs">
+                  {reg.regulationType}
+                </span>
+              )}
+              {reg.gazettePart && (
+                <span className="text-muted-foreground text-sm">
+                  {usedLang === "fr" ? "Gazette" : "Gazette"}: {reg.gazettePart}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-muted-foreground text-sm">
+            {metadata.status && (
               <span>
                 <strong>{usedLang === "fr" ? "Statut:" : "Status:"}</strong>{" "}
-                {act.status}
+                {metadata.status}
               </span>
             )}
-            {act.consolidationDate && (
+
+            {/* Act-specific dates */}
+            {act?.consolidationDate && (
               <span>
                 <strong>
                   {usedLang === "fr"
@@ -907,7 +978,53 @@ export function LegislationViewer({
                 {act.consolidationDate}
               </span>
             )}
+
+            {/* Regulation-specific dates */}
+            {reg?.registrationDate && (
+              <span>
+                <strong>
+                  {usedLang === "fr" ? "Enregistré:" : "Registered:"}
+                </strong>{" "}
+                {formatDate(reg.registrationDate)}
+              </span>
+            )}
+            {reg?.consolidationDate && (
+              <span>
+                <strong>
+                  {usedLang === "fr" ? "Consolidation:" : "Consolidation:"}
+                </strong>{" "}
+                {reg.consolidationDate}
+              </span>
+            )}
+            {reg?.lastAmendedDate && (
+              <span>
+                <strong>
+                  {usedLang === "fr"
+                    ? "Dernière modification:"
+                    : "Last Amended:"}
+                </strong>{" "}
+                {formatDate(reg.lastAmendedDate)}
+              </span>
+            )}
           </div>
+
+          {/* Enabling Act (for regulations) */}
+          {reg?.enablingActId && (
+            <div className="mt-3 text-sm">
+              <strong className="text-muted-foreground">
+                {usedLang === "fr" ? "Loi habilitante:" : "Enabling Act:"}
+              </strong>{" "}
+              <a
+                className="text-primary hover:underline"
+                href={buildJusticeCanadaUrl(reg.enablingActId, "act", usedLang)}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                {reg.enablingActTitle || reg.enablingActId}
+                <ExternalLinkIcon className="ml-1 inline size-3" />
+              </a>
+            </div>
+          )}
         </header>
 
         {/* Loading indicator */}
@@ -968,13 +1085,23 @@ export function LegislationViewer({
                 ) : isLoaded ? (
                   <div className="pt-2">
                     <SectionMetadataStrip
-                      actId={actId}
+                      docId={docId}
+                      docType={docType}
                       enactedDate={section.enactedDate}
                       historicalNotes={section.historicalNotes}
                       inForceStartDate={section.inForceStartDate}
                       language={usedLang}
                       lastAmendedDate={section.lastAmendedDate}
                     />
+                    {/* @TODO: Make this Defined Terms dropdown better
+                    <DefinedTermsPanel
+                      docId={docId}
+                      docType={docType}
+                      language={usedLang}
+                      partLabel={section.hierarchyPath?.[0]}
+                      sectionLabel={section.sectionLabel}
+                    />
+                    */}
                     <SectionContentDisplay
                       content={section.content}
                       contentHtml={section.contentHtml}

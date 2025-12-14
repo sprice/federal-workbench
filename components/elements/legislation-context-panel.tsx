@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRightIcon, ExternalLinkIcon } from "lucide-react";
+import { ChevronRightIcon, ScaleIcon } from "lucide-react";
 import { useState } from "react";
 import {
   Collapsible,
@@ -17,11 +17,45 @@ type LegislationContextPanelProps = {
 };
 
 /**
+ * Legislation source pill - consistent interactive element for acts and regulations.
+ * Opens in-app legislation viewer (slide-over panel).
+ */
+function LegislationSourcePill({
+  source,
+  onOpen,
+  isFr,
+}: {
+  source: HydratedLegislationSource;
+  onOpen: () => void;
+  isFr: boolean;
+}) {
+  const isAct = source.sourceType === "act";
+  const label = source.displayLabel ?? (isAct ? "View Act" : "View Regulation");
+  const ariaLabel = isFr
+    ? `Ouvrir ${label} dans le visualiseur`
+    : `Open ${label} in viewer`;
+
+  return (
+    <button
+      aria-label={ariaLabel}
+      className="group flex w-full items-center gap-2.5 rounded-lg border border-border/60 bg-card/50 px-3 py-2 text-left transition-all hover:border-primary/30 hover:bg-accent/50"
+      onClick={onOpen}
+      type="button"
+    >
+      <ScaleIcon className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+      <span className="flex-1 truncate font-medium text-foreground text-sm">
+        {label}
+      </span>
+      <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
+    </button>
+  );
+}
+
+/**
  * Multi-tier display for legislation context in chat messages.
  *
- * Tier 1: Act - prominent link
- * Tier 2: Regulation - secondary link
- * Tier 3: Related Resources - expandable panel with sections, terms, cross-refs
+ * Primary: Act/Regulation - prominent pill buttons
+ * Secondary: Related Resources - expandable panel with sections, terms, cross-refs
  */
 export function LegislationContextPanel({
   hydratedSources,
@@ -41,6 +75,8 @@ export function LegislationContextPanel({
   const panelSources = hydratedSources.filter((s) =>
     ["act_section", "defined_term", "cross_reference"].includes(s.sourceType)
   );
+
+  const hasPrimarySources = actSource || regSource;
 
   // Format label for panel items
   const formatPanelLabel = (source: HydratedLegislationSource): string => {
@@ -68,36 +104,37 @@ export function LegislationContextPanel({
 
   return (
     <div className="mt-3 space-y-2">
-      {/* Tier 1: Act (prominent link) */}
-      {actSource && (
-        <button
-          className="group flex items-center gap-1.5 font-medium text-primary hover:underline"
-          onClick={() => onOpenSource(actSource)}
-          type="button"
-        >
-          <span>{actSource.displayLabel ?? "View Act"}</span>
-          <ExternalLinkIcon className="size-3.5 opacity-50 group-hover:opacity-100" />
-        </button>
-      )}
-
-      {/* Tier 2: Regulation (secondary) */}
-      {regSource && (
-        <div className="text-muted-foreground text-sm">
-          {isFr ? "Connexe: " : "Related: "}
-          <button
-            className="text-primary hover:underline"
-            onClick={() => onOpenSource(regSource)}
-            type="button"
-          >
-            {regSource.displayLabel ?? "View Regulation"}
-          </button>
+      {/* Primary legislation sources - equal visual weight */}
+      {hasPrimarySources && (
+        <div className="space-y-1.5">
+          {actSource && (
+            <LegislationSourcePill
+              isFr={isFr}
+              onOpen={() => onOpenSource(actSource)}
+              source={actSource}
+            />
+          )}
+          {regSource && (
+            <LegislationSourcePill
+              isFr={isFr}
+              onOpen={() => onOpenSource(regSource)}
+              source={regSource}
+            />
+          )}
         </div>
       )}
 
-      {/* Tier 3: Expandable panel */}
+      {/* Expandable panel for additional resources */}
       {panelSources.length > 0 && (
         <Collapsible onOpenChange={setOpen} open={open}>
-          <CollapsibleTrigger className="flex items-center gap-1 text-muted-foreground text-sm hover:text-foreground">
+          <CollapsibleTrigger
+            aria-label={
+              isFr
+                ? `${open ? "Masquer" : "Afficher"} les ressources connexes`
+                : `${open ? "Hide" : "Show"} related resources`
+            }
+            className="flex items-center gap-1 text-muted-foreground text-sm hover:text-foreground"
+          >
             <ChevronRightIcon
               className={cn(
                 "size-4 transition-transform duration-200",
