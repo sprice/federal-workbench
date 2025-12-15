@@ -1,6 +1,5 @@
 "use client";
 
-import parse from "html-react-parser";
 import {
   CheckCircle2Icon,
   ChevronRightIcon,
@@ -31,8 +30,7 @@ import type { ContentNode } from "@/lib/legislation/types";
 import { cn } from "@/lib/utils";
 import { ContentTreeRenderer } from "./content-tree-renderer";
 
-// @TODO: Make this Defined Terms dropdown better
-// import { DefinedTermsPanel } from "./defined-terms-panel";
+import { DefinedTermsPanel } from "./defined-terms-panel";
 
 type DocType = "act" | "regulation";
 type DocumentMetadata = ActMetadata | RegulationMetadata;
@@ -64,13 +62,11 @@ const SECTION_TARGET_PATTERN = /(?:section_?)?(\d+(?:\.\d+)?)/i;
 
 function SectionContentDisplay({
   content,
-  contentHtml,
   contentTree,
   language,
   onNavigate,
 }: {
   content: string;
-  contentHtml: string | null;
   contentTree: ContentNode[] | null;
   language: "en" | "fr";
   onNavigate?: (target: string) => void;
@@ -91,15 +87,6 @@ function SectionContentDisplay({
           nodes={contentTree}
           onNavigate={onNavigate}
         />
-      </div>
-    );
-  }
-
-  // Fallback to contentHtml (HTML string parsing)
-  if (contentHtml) {
-    return (
-      <div className="legislation-content prose prose-sm dark:prose-invert max-w-none">
-        {parse(contentHtml)}
       </div>
     );
   }
@@ -1093,7 +1080,6 @@ export function LegislationViewer({
                       language={usedLang}
                       lastAmendedDate={section.lastAmendedDate}
                     />
-                    {/* @TODO: Make this Defined Terms dropdown better
                     <DefinedTermsPanel
                       docId={docId}
                       docType={docType}
@@ -1101,10 +1087,8 @@ export function LegislationViewer({
                       partLabel={section.hierarchyPath?.[0]}
                       sectionLabel={section.sectionLabel}
                     />
-                    */}
                     <SectionContentDisplay
                       content={section.content}
-                      contentHtml={section.contentHtml}
                       contentTree={section.contentTree}
                       language={usedLang}
                       onNavigate={handleInternalNavigation}

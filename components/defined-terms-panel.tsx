@@ -1,7 +1,7 @@
 "use client";
 
 import { BookOpenIcon, ChevronDownIcon, ChevronRightIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DefinedTermsResponse } from "@/app/(chat)/api/legislation/defined-terms/route";
 import type { DefinedTermItem } from "@/lib/db/legislation/queries";
 import {
@@ -18,11 +18,106 @@ type DefinedTermsPanelProps = {
   partLabel?: string;
 };
 
-function truncateDefinition(text: string, maxLength = 80): string {
-  if (text.length <= maxLength) {
-    return text;
+// Pre-compiled regex patterns for performance
+const TRAILING_PARENS_PATTERN = /\s*\(\s*\)\s*$/g;
+const MULTI_SPACE_PATTERN = /\s+/g;
+const MEANS_PATTERN = /^(.+?)\s+means\s+(.+)$/i;
+const LEADING_NUMBER_PATTERN = /^\d+\s*/;
+
+/**
+ * Parse a definition to extract the French term and clean definition.
+ *
+ * The raw definition often has the pattern:
+ *   "{englishTerm} {frenchTerm} means {definition}"
+ * e.g., "applicant demandeur means the person who..."
+ *
+ * This extracts the French term so we can display it separately in italics.
+ */
+function parseDefinition(
+  englishTerm: string,
+  rawDefinition: string
+): { frenchTerm: string | null; definition: string } {
+  // Clean up the raw definition first
+  const cleaned = rawDefinition
+    .replace(TRAILING_PARENS_PATTERN, "") // Remove trailing "()"
+    .replace(MULTI_SPACE_PATTERN, " ") // Normalize spaces
+    .trim();
+
+  // Look for " means " to split the definition
+  const meansMatch = cleaned.match(MEANS_PATTERN);
+  if (!meansMatch) {
+    return { frenchTerm: null, definition: cleaned };
   }
-  return `${text.slice(0, maxLength).trim()}...`;
+
+  const beforeMeans = meansMatch[1];
+  const afterMeans = meansMatch[2];
+
+  // Check if beforeMeans starts with the English term (case-insensitive)
+  const termLower = englishTerm.toLowerCase();
+  const beforeLower = beforeMeans.toLowerCase();
+
+  if (beforeLower.startsWith(termLower)) {
+    // Extract what's between the English term and "means"
+    let frenchPart = beforeMeans.slice(englishTerm.length).trim();
+
+    // Clean up common artifacts: leading numbers, stray punctuation
+    frenchPart = frenchPart.replace(LEADING_NUMBER_PATTERN, "").trim();
+
+    // Capitalize the definition after "means"
+    const capitalizedDef =
+      afterMeans.charAt(0).toUpperCase() + afterMeans.slice(1);
+    const cleanDef = capitalizedDef.replace(TRAILING_PARENS_PATTERN, "").trim();
+
+    if (frenchPart) {
+      return {
+        frenchTerm: frenchPart,
+        definition: cleanDef,
+      };
+    }
+
+    return { frenchTerm: null, definition: cleanDef };
+  }
+
+  // Fallback: couldn't parse, return cleaned definition
+  return { frenchTerm: null, definition: cleaned };
+}
+
+/**
+ * Truncate definition text for preview, parsing out French term first.
+ */
+function truncateDefinition(
+  englishTerm: string,
+  rawDefinition: string,
+  maxLength = 70
+): { frenchTerm: string | null; preview: string } {
+  const { frenchTerm, definition } = parseDefinition(
+    englishTerm,
+    rawDefinition
+  );
+  const preview =
+    definition.length <= maxLength
+      ? definition
+      : `${definition.slice(0, maxLength).trim()}...`;
+  return { frenchTerm, preview };
+}
+
+/**
+ * Get a clean scope label based on scopeType.
+ * We don't use scopeRawText because it often contains malformed/concatenated data.
+ */
+function getScopeLabel(scopeType: string, language: "en" | "fr"): string {
+  switch (scopeType) {
+    case "act":
+      return language === "fr" ? "Loi entière" : "Entire Act";
+    case "regulation":
+      return language === "fr" ? "Règlement entier" : "Entire Regulation";
+    case "part":
+      return language === "fr" ? "Cette partie" : "This Part";
+    case "section":
+      return language === "fr" ? "Cette section" : "This Section";
+    default:
+      return language === "fr" ? "Portée limitée" : "Limited scope";
+  }
 }
 
 function TermRow({
@@ -36,21 +131,12 @@ function TermRow({
   onToggle: () => void;
   language: "en" | "fr";
 }) {
-  const scopeLabel =
-    term.scopeType === "act"
-      ? language === "fr"
-        ? "Loi entière"
-        : "Entire Act"
-      : term.scopeType === "regulation"
-        ? language === "fr"
-          ? "Règlement entier"
-          : "Entire Regulation"
-        : term.scopeType === "part"
-          ? language === "fr"
-            ? "Cette partie"
-            : "This Part"
-          : term.scopeRawText ||
-            (language === "fr" ? "Section(s)" : "Section(s)");
+  const scopeLabel = getScopeLabel(term.scopeType, language);
+  const { definition } = parseDefinition(term.term, term.definition);
+  const { frenchTerm, preview } = truncateDefinition(
+    term.term,
+    term.definition
+  );
 
   const ariaLabel =
     language === "fr"
@@ -70,9 +156,14 @@ function TermRow({
         )}
         <div className="min-w-0 flex-1">
           <span className="font-medium text-sm">{term.term}</span>
+          {frenchTerm && (
+            <span className="ml-1 text-muted-foreground text-sm italic">
+              ({frenchTerm})
+            </span>
+          )}
           {!isExpanded && (
             <span className="ml-2 text-muted-foreground text-sm">
-              {truncateDefinition(term.definition)}
+              {preview}
             </span>
           )}
         </div>
@@ -80,19 +171,18 @@ function TermRow({
 
       <CollapsibleContent>
         <div className="mt-1 mb-3 ml-6 rounded-md border bg-muted/30 p-3">
-          <p className="text-sm leading-relaxed">{term.definition}</p>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-muted-foreground text-xs">
-            {term.sectionLabel && (
-              <span>
+          <p className="text-sm leading-relaxed">{definition}</p>
+          <p className="mt-2 text-muted-foreground text-xs italic">
+            {term.sectionLabel ? (
+              <>
                 {language === "fr"
-                  ? "Défini à l'article"
-                  : "Defined in Section"}{" "}
-                {term.sectionLabel}
-              </span>
-            )}
-            {term.sectionLabel && <span className="text-border">·</span>}
-            <span className="italic">{scopeLabel}</span>
-          </div>
+                  ? `Défini à l'article ${term.sectionLabel}`
+                  : `Defined in Section ${term.sectionLabel}`}
+                {" · "}
+              </>
+            ) : null}
+            {scopeLabel}
+          </p>
         </div>
       </CollapsibleContent>
     </Collapsible>
@@ -162,7 +252,17 @@ export function DefinedTermsPanel({
     setExpandedTermId((prev) => (prev === termId ? null : termId));
   }, []);
 
-  // Don't render anything while loading or if there are no terms
+  // Filter out globally-scoped terms (act/regulation-wide definitions)
+  // Only show terms with section-specific or part-specific definitions
+  const uniqueTerms = useMemo(
+    () =>
+      terms.filter(
+        (term) => term.scopeType !== "act" && term.scopeType !== "regulation"
+      ),
+    [terms]
+  );
+
+  // Don't render anything while loading or if there are no unique terms
   if (isLoading) {
     return null;
   }
@@ -171,15 +271,15 @@ export function DefinedTermsPanel({
     return null; // Silently fail - this is supplementary info
   }
 
-  if (terms.length === 0) {
+  if (uniqueTerms.length === 0) {
     return null;
   }
 
   const labels = {
     definedTerms:
       language === "fr"
-        ? `${terms.length} terme${terms.length > 1 ? "s" : ""} défini${terms.length > 1 ? "s" : ""}`
-        : `${terms.length} defined term${terms.length > 1 ? "s" : ""}`,
+        ? `${uniqueTerms.length} terme${uniqueTerms.length > 1 ? "s" : ""} défini${uniqueTerms.length > 1 ? "s" : ""} unique${uniqueTerms.length > 1 ? "s" : ""}`
+        : `${uniqueTerms.length} unique defined term${uniqueTerms.length > 1 ? "s" : ""}`,
     show: language === "fr" ? "Afficher" : "Show",
     hide: language === "fr" ? "Masquer" : "Hide",
   };
@@ -208,7 +308,7 @@ export function DefinedTermsPanel({
         <CollapsibleContent>
           <div className="mt-2 rounded-lg border bg-card p-3">
             <div className="space-y-0.5">
-              {terms.map((term) => (
+              {uniqueTerms.map((term) => (
                 <TermRow
                   isExpanded={expandedTermId === term.id}
                   key={term.id}

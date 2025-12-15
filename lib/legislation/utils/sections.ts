@@ -19,6 +19,7 @@ import {
   parseDefinitionScope,
 } from "./definitions";
 import { extractFootnotes, extractHistoricalNotes } from "./document-metadata";
+import { extractHeadingComponents } from "./heading";
 import { extractChangeType, extractLimsMetadata } from "./metadata";
 import {
   extractCrossReferences,
@@ -29,7 +30,7 @@ import {
   extractScheduleListContent,
   type ScheduleContext,
 } from "./schedules";
-import { extractHtmlContent, extractTextContent } from "./text";
+import { extractTextContent } from "./text";
 
 /**
  * Determine if a section element represents a repealed section.
@@ -181,7 +182,6 @@ export function parseSections(options: ParseSectionsOptions): {
     const limsMetadata = extractLimsMetadata(sectionEl);
     const historicalNotes = extractHistoricalNotes(sectionEl);
     const footnotes = extractFootnotes(sectionEl);
-    const contentHtml = extractHtmlContent(sectionEl);
     const contentFlags = extractContentFlags(sectionEl);
     const internalReferences = extractInternalReferences(sectionEl);
     // Lower Priority: Extract formatting attributes
@@ -196,7 +196,6 @@ export function parseSections(options: ParseSectionsOptions): {
       hierarchyPath: [...currentHierarchy],
       marginalNote,
       content,
-      contentHtml: contentHtml || undefined,
       status,
       xmlType,
       xmlTarget,
@@ -379,12 +378,7 @@ export function parseSections(options: ParseSectionsOptions): {
         }
         const h = heading as Record<string, unknown>;
         const level = Number.parseInt(String(h["@_level"] || "1"), 10);
-        const titleText = h.TitleText
-          ? extractTextContent(h.TitleText)
-          : undefined;
-        const labelText = h.Label ? extractTextContent(h.Label) : undefined;
-
-        const headingText = [labelText, titleText].filter(Boolean).join(" ");
+        const { combined: headingText } = extractHeadingComponents(h);
 
         // Adjust hierarchy based on level
         while (currentHierarchy.length >= level) {
@@ -454,7 +448,6 @@ export function parseSections(options: ParseSectionsOptions): {
           );
           const limsMetadata = extractLimsMetadata(provObj);
           const footnotes = extractFootnotes(provObj);
-          const contentHtml = extractHtmlContent(provObj);
           const contentFlags = extractContentFlags(provObj);
           const internalReferences = extractInternalReferences(provObj);
           const formattingAttributes = extractFormattingAttributes(provObj);
@@ -472,7 +465,6 @@ export function parseSections(options: ParseSectionsOptions): {
             hierarchyPath: [...currentHierarchy],
             marginalNote,
             content,
-            contentHtml: contentHtml || undefined,
             status,
             inForceStartDate,
             lastAmendedDate,

@@ -465,7 +465,7 @@ async function insertDocument(doc: ParsedDocument): Promise<void> {
         hierarchyPath: section.hierarchyPath,
         marginalNote: section.marginalNote,
         content: section.content,
-        contentHtml: section.contentHtml,
+        contentTree: section.contentTree,
         status: section.status,
         xmlType: section.xmlType,
         xmlTarget: section.xmlTarget,

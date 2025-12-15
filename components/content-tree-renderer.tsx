@@ -494,6 +494,21 @@ function renderNode(
           {children}
         </div>
       );
+    case "Heading": {
+      // Render heading with appropriate HTML tag based on level
+      const level = "level" in node ? (node.level as number) : 3;
+      const HeadingTag = `h${Math.min(Math.max(level + 1, 2), 6)}` as
+        | "h2"
+        | "h3"
+        | "h4"
+        | "h5"
+        | "h6";
+      return (
+        <HeadingTag className="my-4 font-bold text-foreground" key={key}>
+          {children}
+        </HeadingTag>
+      );
+    }
     case "LeaderRightJustified":
       return (
         <span className="leader-right flex justify-between" key={key}>

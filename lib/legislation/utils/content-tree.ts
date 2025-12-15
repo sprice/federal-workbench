@@ -30,6 +30,576 @@ const preserveOrderParser = new XMLParser({
 });
 
 /**
+ * Parsed XML data from preserveOrder parser.
+ * This is an opaque type - callers should not inspect the structure directly.
+ */
+export type PreservedOrderData = unknown[];
+
+/**
+ * Parse an XML file with preserveOrder=true.
+ * Call this once per file, then pass the result to extraction functions.
+ *
+ * This avoids re-parsing the same file multiple times when extracting
+ * different content types (sections, definitions, preambles, treaties).
+ */
+export function parseFileWithPreservedOrder(
+  filePath: string
+): PreservedOrderData {
+  const xmlContent = readFileSync(filePath, "utf-8");
+  return preserveOrderParser.parse(xmlContent);
+}
+
+// =============================================================================
+// COMBINED EXTRACTION (Single Tree Walk)
+// =============================================================================
+
+/**
+ * Result from combined extraction - all content types in one pass.
+ * This is much faster than calling individual extraction functions.
+ */
+export type ExtractedContent = {
+  contentTrees: SectionContentTree[];
+  sectionContents: SectionContent[];
+  definitionTexts: DefinitionText[];
+  preamble: PreambleProvisionText[] | undefined;
+  treaties: TreatyContentText[] | undefined;
+};
+
+/**
+ * Context for combined extraction walk - bundles all mutable state.
+ */
+type ExtractionContext = {
+  result: ExtractedContent;
+  state: ParserState;
+  preambleProvisions: PreambleProvisionText[];
+  treatyContents: TreatyContentText[];
+};
+
+/**
+ * Detect document language from root element (Statute/Regulation) xml:lang attribute.
+ * Returns "en" if not found or not recognized.
+ */
+function detectDocumentLanguage(parsed: PreservedOrderData): "en" | "fr" {
+  if (!Array.isArray(parsed)) {
+    return "en";
+  }
+
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    // Check for root elements (Statute for acts, Regulation for regulations)
+    if (tag === "Statute" || tag === "Regulation") {
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const lang = attrs?.["@_xml:lang"] as string | undefined;
+      if (lang?.toLowerCase().startsWith("fr")) {
+        return "fr";
+      }
+      return "en";
+    }
+
+    // Recurse into container elements
+    const value = obj[tag];
+    if (Array.isArray(value)) {
+      const nested = detectDocumentLanguage(value);
+      if (nested !== "en") {
+        return nested;
+      }
+    }
+  }
+
+  return "en";
+}
+
+/**
+ * Extract all content types from pre-parsed XML data in a single tree walk.
+ * This is ~5x faster than calling individual extraction functions.
+ *
+ * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
+ */
+export function extractAllContent(
+  parsed: PreservedOrderData
+): ExtractedContent {
+  const language = detectDocumentLanguage(parsed);
+  const ctx: ExtractionContext = {
+    result: {
+      contentTrees: [],
+      sectionContents: [],
+      definitionTexts: [],
+      preamble: undefined,
+      treaties: undefined,
+    },
+    state: { globalSectionOrder: 0, currentHierarchy: [], language },
+    preambleProvisions: [],
+    treatyContents: [],
+  };
+
+  walkForAllContent(parsed, ctx);
+
+  if (ctx.preambleProvisions.length > 0) {
+    ctx.result.preamble = ctx.preambleProvisions;
+  }
+  if (ctx.treatyContents.length > 0) {
+    ctx.result.treaties = ctx.treatyContents;
+  }
+
+  return ctx.result;
+}
+
+/**
+ * Combined tree walk that extracts all content types simultaneously.
+ */
+function walkForAllContent(items: unknown[], ctx: ExtractionContext): void {
+  if (!Array.isArray(items)) {
+    return;
+  }
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const children = Array.isArray(value) ? value : [];
+    const attrs = obj[":@"] as Record<string, unknown> | undefined;
+
+    // Handle Heading elements - update hierarchy and add as searchable content
+    if (tag === "Heading") {
+      updateHierarchyFromHeading(children, attrs, ctx.state);
+      // Also add to content trees for searchability
+      const contentChildren = convertPreservedToContentTree(children);
+      const headingNode = convertTagToNode(tag, contentChildren, attrs || {});
+      if (headingNode) {
+        const headingLabel = ctx.state.currentHierarchy.at(-1) || "Heading";
+        ctx.result.contentTrees.push({
+          sectionLabel: headingLabel,
+          contentTree: [headingNode],
+          hierarchyPath: [...ctx.state.currentHierarchy],
+          limsId: null,
+        });
+      }
+      continue;
+    }
+
+    // Handle Preamble
+    if (tag === "Preamble") {
+      extractPreambleProvisions(children, ctx.preambleProvisions);
+      continue;
+    }
+
+    // Handle Treaties (multiple tag names used in legislation XML)
+    if (
+      tag === "TreatyAgreement" ||
+      tag === "Convention" ||
+      tag === "Agreement" ||
+      tag === "ConventionAgreementTreaty"
+    ) {
+      const treaty = extractTreatyContent(children);
+      if (treaty) {
+        ctx.treatyContents.push(treaty);
+      }
+      continue;
+    }
+
+    // Handle Definition elements
+    if (tag === "Definition") {
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      if (limsId) {
+        const definitionText = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (definitionText) {
+          ctx.result.definitionTexts.push({ limsId, definitionText });
+        }
+      }
+      continue;
+    }
+
+    // Handle Enacts element (enacting clause)
+    if (tag === "Enacts") {
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+
+      // Content tree
+      const contentChildren = filterContentChildren(children);
+      const contentTree = convertPreservedToContentTree(contentChildren);
+      if (contentTree.length > 0) {
+        ctx.result.contentTrees.push({
+          sectionLabel: "Enacting Clause",
+          contentTree,
+          hierarchyPath: [...ctx.state.currentHierarchy],
+          limsId,
+        });
+      }
+
+      // Section content (plain text)
+      if (limsId) {
+        const content = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (content) {
+          ctx.result.sectionContents.push({ limsId, content });
+        }
+      }
+      continue;
+    }
+
+    // Handle Schedule elements
+    if (tag === "Schedule") {
+      extractScheduleContentCombined(children, ctx.result, ctx.state);
+      // Only look for treaties and definitions within schedules
+      // (don't re-process Section/Provision - already handled by walkScheduleItemsCombined)
+      walkScheduleForTreatiesAndDefinitions(children, ctx);
+      continue;
+    }
+
+    // Handle Section elements
+    if (tag === "Section") {
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+      const label = extractLabelFromPreserved(children);
+
+      if (label) {
+        ctx.state.globalSectionOrder++;
+
+        // Content tree
+        const contentChildren = filterContentChildren(children);
+        const contentTree = convertPreservedToContentTree(contentChildren);
+        if (contentTree.length > 0) {
+          ctx.result.contentTrees.push({
+            sectionLabel: label,
+            contentTree,
+            hierarchyPath: [...ctx.state.currentHierarchy],
+            limsId,
+          });
+        }
+
+        // Section content (plain text)
+        if (limsId) {
+          const content = extractTextFromPreserved(children)
+            .replace(/\s+/g, " ")
+            .trim();
+          if (content) {
+            ctx.result.sectionContents.push({ limsId, content });
+          }
+        }
+      }
+
+      // Recurse to find nested definitions
+      walkForAllContent(children, ctx);
+      continue;
+    }
+
+    // Handle Provision elements (in Order blocks - regulations)
+    if (tag === "Provision") {
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+      ctx.state.globalSectionOrder++;
+
+      const label = extractLabelFromPreserved(children);
+      const provLabel = label || `order-${ctx.state.globalSectionOrder}`;
+
+      // Content tree
+      const contentChildren = filterContentChildren(children);
+      const contentTree = convertPreservedToContentTree(contentChildren);
+      if (contentTree.length > 0) {
+        ctx.result.contentTrees.push({
+          sectionLabel: provLabel,
+          contentTree,
+          hierarchyPath: [...ctx.state.currentHierarchy],
+          limsId,
+        });
+      }
+
+      // Section content (plain text)
+      if (limsId) {
+        const content = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (content) {
+          ctx.result.sectionContents.push({ limsId, content });
+        }
+      }
+
+      // Recurse to find nested definitions
+      walkForAllContent(children, ctx);
+      continue;
+    }
+
+    // Recurse into container elements
+    if (children.length > 0) {
+      walkForAllContent(children, ctx);
+    }
+  }
+}
+
+/**
+ * Walk schedule children looking ONLY for treaties and definitions.
+ * This avoids re-processing Section/Provision which are already handled
+ * by walkScheduleItemsCombined.
+ */
+function walkScheduleForTreatiesAndDefinitions(
+  items: unknown[],
+  ctx: ExtractionContext
+): void {
+  if (!Array.isArray(items)) {
+    return;
+  }
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const children = Array.isArray(value) ? value : [];
+    const attrs = obj[":@"] as Record<string, unknown> | undefined;
+
+    // Handle Treaties within schedules (multiple tag names used in legislation XML)
+    if (
+      tag === "TreatyAgreement" ||
+      tag === "Convention" ||
+      tag === "Agreement" ||
+      tag === "ConventionAgreementTreaty"
+    ) {
+      const treaty = extractTreatyContent(children);
+      if (treaty) {
+        ctx.treatyContents.push(treaty);
+      }
+      continue;
+    }
+
+    // Handle Definition elements within schedules
+    if (tag === "Definition") {
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      if (limsId) {
+        const definitionText = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (definitionText) {
+          ctx.result.definitionTexts.push({ limsId, definitionText });
+        }
+      }
+      continue;
+    }
+
+    // Recurse into container elements (but skip Section/Provision/Item which are already handled)
+    if (
+      children.length > 0 &&
+      tag !== "Section" &&
+      tag !== "Provision" &&
+      tag !== "Item" &&
+      tag !== "FormGroup" &&
+      tag !== "TableGroup"
+    ) {
+      walkScheduleForTreatiesAndDefinitions(children, ctx);
+    }
+  }
+}
+
+/**
+ * Extract schedule content for combined walk.
+ */
+function extractScheduleContentCombined(
+  scheduleChildren: unknown[],
+  result: ExtractedContent,
+  state: ParserState
+): void {
+  // Get schedule label (may be null for schedules without ScheduleFormHeading)
+  // Use language-appropriate fallback: "Schedule" (en) or "Annexe" (fr)
+  const fallbackLabel = state.language === "fr" ? "Annexe" : "Schedule";
+  const scheduleLabel = extractScheduleLabel(scheduleChildren) ?? fallbackLabel;
+
+  // Process all schedule item types
+  walkScheduleItemsCombined(scheduleChildren, scheduleLabel, result, state);
+}
+
+/**
+ * Walk schedule items and extract both content trees and section content.
+ */
+function walkScheduleItemsCombined(
+  children: unknown[],
+  scheduleLabel: string,
+  result: ExtractedContent,
+  state: ParserState
+): void {
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const tagChildren = Array.isArray(value) ? value : [];
+    const attrs = obj[":@"] as Record<string, unknown> | undefined;
+
+    if (tag === "Item") {
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+      state.globalSectionOrder++;
+      const itemLabel = extractLabelFromPreserved(tagChildren);
+      const sectionLabel = itemLabel
+        ? `${scheduleLabel} Item ${itemLabel}`
+        : `${scheduleLabel} Item ${state.globalSectionOrder}`;
+
+      // Content tree
+      const contentChildren = filterContentChildren(tagChildren);
+      const contentTree = convertPreservedToContentTree(contentChildren);
+      if (contentTree.length > 0) {
+        result.contentTrees.push({
+          sectionLabel,
+          contentTree,
+          hierarchyPath: [scheduleLabel],
+          limsId,
+        });
+      }
+
+      // Section content
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (content) {
+          result.sectionContents.push({ limsId, content });
+        }
+      }
+
+      // Recurse for nested items
+      walkScheduleItemsCombined(tagChildren, scheduleLabel, result, state);
+    } else if (tag === "FormGroup") {
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+      state.globalSectionOrder++;
+
+      const contentTree = convertPreservedToContentTree(tagChildren);
+      if (contentTree.length > 0) {
+        result.contentTrees.push({
+          sectionLabel: `${scheduleLabel} Form`,
+          contentTree,
+          hierarchyPath: [scheduleLabel],
+          limsId,
+        });
+      }
+
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (content) {
+          result.sectionContents.push({ limsId, content });
+        }
+      }
+    } else if (tag === "TableGroup") {
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+      state.globalSectionOrder++;
+
+      const contentTree = convertPreservedToContentTree(tagChildren);
+      if (contentTree.length > 0) {
+        result.contentTrees.push({
+          sectionLabel: `${scheduleLabel} Table`,
+          contentTree,
+          hierarchyPath: [scheduleLabel],
+          limsId,
+        });
+      }
+
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (content) {
+          result.sectionContents.push({ limsId, content });
+        }
+      }
+    } else if (tag === "Provision") {
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+      state.globalSectionOrder++;
+      const provLabel = extractLabelFromPreserved(tagChildren);
+      const sectionLabel = provLabel
+        ? `${scheduleLabel} ${provLabel}`.trim()
+        : `${scheduleLabel} Provision ${state.globalSectionOrder}`.trim();
+
+      const contentChildren = filterContentChildren(tagChildren);
+      const contentTree = convertPreservedToContentTree(contentChildren);
+      if (contentTree.length > 0) {
+        result.contentTrees.push({
+          sectionLabel,
+          contentTree,
+          hierarchyPath: [scheduleLabel],
+          limsId,
+        });
+      }
+
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (content) {
+          result.sectionContents.push({ limsId, content });
+        }
+      }
+    } else if (tag === "Section") {
+      // Sections within schedules (e.g., in BillPiece containers)
+      const limsId = (attrs?.["@_lims:id"] as string) || null;
+      state.globalSectionOrder++;
+      const sectionLabelText = extractLabelFromPreserved(tagChildren);
+      const sectionLabelFull = sectionLabelText
+        ? `${scheduleLabel} ${sectionLabelText}`.trim()
+        : `${scheduleLabel} Section ${state.globalSectionOrder}`.trim();
+
+      const contentChildren = filterContentChildren(tagChildren);
+      const contentTree = convertPreservedToContentTree(contentChildren);
+      if (contentTree.length > 0) {
+        result.contentTrees.push({
+          sectionLabel: sectionLabelFull,
+          contentTree,
+          hierarchyPath: [scheduleLabel],
+          limsId,
+        });
+      }
+
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+        if (content) {
+          result.sectionContents.push({ limsId, content });
+        }
+      }
+    } else if (
+      tag === "List" ||
+      tag === "DocumentInternal" ||
+      tag === "Group" ||
+      tag === "BillPiece" ||
+      tag === "RegulationPiece" ||
+      tag === "RelatedOrNotInForce"
+    ) {
+      // Container elements - recurse into them (per LIMS2HTML.xsl patterns)
+      walkScheduleItemsCombined(tagChildren, scheduleLabel, result, state);
+    }
+  }
+}
+
+/**
  * Result from content tree extraction for a single section.
  */
 export type SectionContentTree = {
@@ -59,21 +629,30 @@ type ParserState = {
    * Updated when Heading elements are encountered.
    */
   currentHierarchy: string[];
+  /**
+   * Document language from xml:lang attribute on root element.
+   * Used for language-appropriate fallback labels (e.g., "Schedule" vs "Annexe").
+   */
+  language: "en" | "fr";
 };
 
 /**
- * Parse an XML file and extract content trees for all sections.
+ * Extract content trees for all sections from pre-parsed XML data.
  * Returns an array of { sectionLabel, contentTree } for joining with
  * the main parser's canonicalSectionId.
+ *
+ * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
  */
-export function extractContentTreesFromFile(
-  filePath: string
+export function extractContentTrees(
+  parsed: PreservedOrderData
 ): SectionContentTree[] {
-  const xmlContent = readFileSync(filePath, "utf-8");
-  const parsed = preserveOrderParser.parse(xmlContent);
-
   const results: SectionContentTree[] = [];
-  const state: ParserState = { globalSectionOrder: 0, currentHierarchy: [] };
+  const language = detectDocumentLanguage(parsed);
+  const state: ParserState = {
+    globalSectionOrder: 0,
+    currentHierarchy: [],
+    language,
+  };
 
   // Walk the preserved structure to find sections
   walkPreservedStructure(parsed, results, state);
@@ -108,12 +687,23 @@ function walkPreservedStructure(
     const value = obj[tag];
     const children = Array.isArray(value) ? value : [];
 
-    // Handle Heading elements - update hierarchy before processing sections
+    // Handle Heading elements - update hierarchy and add as searchable content
     if (tag === "Heading") {
       // Pass attributes from parent object - level is on the Heading element itself
       const attrs = obj[":@"] as Record<string, unknown> | undefined;
       updateHierarchyFromHeading(children, attrs, state);
-      // Don't recurse into Heading - it's not a container
+      // Also add to results for searchability
+      const contentChildren = convertPreservedToContentTree(children);
+      const headingNode = convertTagToNode(tag, contentChildren, attrs || {});
+      if (headingNode) {
+        const headingLabel = state.currentHierarchy.at(-1) || "Heading";
+        results.push({
+          sectionLabel: headingLabel,
+          contentTree: [headingNode],
+          hierarchyPath: [...state.currentHierarchy],
+          limsId: null,
+        });
+      }
       continue;
     }
 
@@ -304,11 +894,10 @@ function extractScheduleContent(
   results: SectionContentTree[],
   state: ParserState
 ): void {
-  // Get schedule label from ScheduleFormHeading or @id
-  const scheduleLabel = extractScheduleLabel(scheduleChildren);
-  if (!scheduleLabel) {
-    return;
-  }
+  // Get schedule label (may be null for schedules without ScheduleFormHeading)
+  // Use language-appropriate fallback: "Schedule" (en) or "Annexe" (fr)
+  const fallbackLabel = state.language === "fr" ? "Annexe" : "Schedule";
+  const scheduleLabel = extractScheduleLabel(scheduleChildren) ?? fallbackLabel;
 
   // Process List elements (schedule items)
   extractScheduleListItems(scheduleChildren, scheduleLabel, results, state);
@@ -1081,6 +1670,14 @@ function convertTagToNode(
       return { type: "ReadAsText", children };
     case "ScheduleFormHeading":
       return { type: "ScheduleFormHeading", children };
+    case "Heading":
+      return {
+        type: "Heading",
+        level: attrs["@_level"]
+          ? Number.parseInt(attrs["@_level"] as string, 10)
+          : undefined,
+        children,
+      };
     case "LeaderRightJustified":
       return { type: "LeaderRightJustified", children };
 
@@ -1141,4 +1738,630 @@ function extractEntryAttrs(
     result.valign = String(attrs["@_valign"]);
   }
   return result;
+}
+
+// =============================================================================
+// DEFINITION TEXT EXTRACTION
+// =============================================================================
+
+/**
+ * Result from definition text extraction.
+ */
+export type DefinitionText = {
+  /** Justice Canada's unique element ID (lims:id attribute) */
+  limsId: string;
+  /** Full definition text with proper document order */
+  definitionText: string;
+};
+
+/**
+ * Extract definition text for all Definition elements from pre-parsed XML data.
+ * Uses preserveOrder=true to maintain correct text order in mixed content.
+ *
+ * Returns definitions with their limsId for joining with database records.
+ *
+ * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
+ */
+export function extractDefinitionTexts(
+  parsed: PreservedOrderData
+): DefinitionText[] {
+  const results: DefinitionText[] = [];
+  walkForDefinitions(parsed, results);
+
+  return results;
+}
+
+/**
+ * Walk preserved-order structure to find Definition elements and extract text.
+ */
+function walkForDefinitions(items: unknown[], results: DefinitionText[]): void {
+  if (!Array.isArray(items)) {
+    return;
+  }
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const children = Array.isArray(value) ? value : [];
+
+    if (tag === "Definition") {
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+
+      if (limsId) {
+        // Extract text from all children, preserving order
+        const definitionText = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (definitionText) {
+          results.push({ limsId, definitionText });
+        }
+      }
+      // Don't recurse into Definition - its content is already captured
+      continue;
+    }
+
+    // Recurse into container elements
+    if (children.length > 0) {
+      walkForDefinitions(children, results);
+    }
+  }
+}
+
+// =============================================================================
+// SECTION CONTENT EXTRACTION
+// =============================================================================
+
+/**
+ * Result from section content extraction.
+ */
+export type SectionContent = {
+  /** Justice Canada's unique element ID (lims:id attribute) */
+  limsId: string;
+  /** Full section content as plain text with proper document order */
+  content: string;
+};
+
+/**
+ * Extract plain text content for all Section elements from pre-parsed XML data.
+ * Uses preserveOrder=true to maintain correct text order in mixed content.
+ *
+ * Returns sections with their limsId for joining with database records.
+ *
+ * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
+ */
+export function extractSectionContents(
+  parsed: PreservedOrderData
+): SectionContent[] {
+  const results: SectionContent[] = [];
+  walkForSectionContent(parsed, results);
+
+  return results;
+}
+
+/**
+ * Walk preserved-order structure to find Section/Provision elements and extract text.
+ */
+function walkForSectionContent(
+  items: unknown[],
+  results: SectionContent[]
+): void {
+  if (!Array.isArray(items)) {
+    return;
+  }
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const children = Array.isArray(value) ? value : [];
+
+    // Handle Section elements (acts)
+    if (tag === "Section") {
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+
+      if (limsId) {
+        // Extract text from all children, preserving order
+        const content = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (content) {
+          results.push({ limsId, content });
+        }
+      }
+      // Don't recurse into Section - its content is already captured
+      continue;
+    }
+
+    // Handle Provision elements (regulations)
+    if (tag === "Provision") {
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+
+      if (limsId) {
+        const content = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (content) {
+          results.push({ limsId, content });
+        }
+      }
+      continue;
+    }
+
+    // Handle Enacts element (enacting clause)
+    if (tag === "Enacts") {
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+
+      if (limsId) {
+        const content = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (content) {
+          results.push({ limsId, content });
+        }
+      }
+      continue;
+    }
+
+    // Handle Schedule elements - extract Item content
+    if (tag === "Schedule") {
+      walkScheduleForContent(children, results);
+      continue;
+    }
+
+    // Recurse into container elements
+    if (children.length > 0) {
+      walkForSectionContent(children, results);
+    }
+  }
+}
+
+/**
+ * Walk Schedule children to extract content from Items, FormGroups, TableGroups, etc.
+ */
+function walkScheduleForContent(
+  children: unknown[],
+  results: SectionContent[]
+): void {
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const tagChildren = Array.isArray(value) ? value : [];
+
+    if (tag === "Item") {
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (content) {
+          results.push({ limsId, content });
+        }
+      }
+      // Process nested items
+      walkScheduleForContent(tagChildren, results);
+    } else if (tag === "FormGroup" || tag === "TableGroup") {
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (content) {
+          results.push({ limsId, content });
+        }
+      }
+    } else if (tag === "Provision") {
+      // DocumentInternal provisions
+      const attrs = obj[":@"] as Record<string, unknown> | undefined;
+      const limsId = attrs?.["@_lims:id"] as string | undefined;
+
+      if (limsId) {
+        const content = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (content) {
+          results.push({ limsId, content });
+        }
+      }
+    } else if (tagChildren.length > 0) {
+      // Recurse into containers (List, DocumentInternal, Group, etc.)
+      walkScheduleForContent(tagChildren, results);
+    }
+  }
+}
+
+// =============================================================================
+// PREAMBLE TEXT EXTRACTION
+// =============================================================================
+
+/**
+ * Preamble provision with corrected text order.
+ */
+export type PreambleProvisionText = {
+  /** Full provision text with proper document order */
+  text: string;
+  /** Marginal note (plain text, not affected by order issues) */
+  marginalNote?: string;
+};
+
+/**
+ * Extract preamble provisions with correct text order from pre-parsed XML data.
+ * Uses preserveOrder=true to maintain correct text order in mixed content.
+ *
+ * Returns preamble provisions for the document, or undefined if no preamble.
+ *
+ * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
+ */
+export function extractPreamble(
+  parsed: PreservedOrderData
+): PreambleProvisionText[] | undefined {
+  const results: PreambleProvisionText[] = [];
+  walkForPreamble(parsed, results);
+
+  return results.length > 0 ? results : undefined;
+}
+
+/**
+ * Walk preserved-order structure to find Preamble and extract provision text.
+ */
+function walkForPreamble(
+  items: unknown[],
+  results: PreambleProvisionText[]
+): void {
+  if (!Array.isArray(items)) {
+    return;
+  }
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const children = Array.isArray(value) ? value : [];
+
+    if (tag === "Preamble") {
+      // Found the Preamble element - extract its Provision children
+      extractPreambleProvisions(children, results);
+      return; // Only one preamble per document
+    }
+
+    // Recurse into container elements (Statute, Introduction, etc.)
+    if (children.length > 0) {
+      walkForPreamble(children, results);
+    }
+  }
+}
+
+/**
+ * Extract text from Provision elements within a Preamble.
+ */
+function extractPreambleProvisions(
+  children: unknown[],
+  results: PreambleProvisionText[]
+): void {
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const tagChildren = Array.isArray(value) ? value : [];
+
+    if (tag === "Provision") {
+      // Extract text from this provision, excluding MarginalNote
+      let marginalNote: string | undefined;
+      const textParts: string[] = [];
+
+      for (const provChild of tagChildren) {
+        if (!provChild || typeof provChild !== "object") {
+          continue;
+        }
+        const provObj = provChild as Record<string, unknown>;
+        const provKeys = Object.keys(provObj).filter((k) => k !== ":@");
+        if (provKeys.length === 0) {
+          continue;
+        }
+
+        const provTag = provKeys[0];
+        const provValue = provObj[provTag];
+        const provChildren = Array.isArray(provValue) ? provValue : [];
+
+        if (provTag === "MarginalNote") {
+          // Extract marginal note text (plain text, order doesn't matter)
+          marginalNote = extractTextFromPreserved(provChildren)
+            .replace(/\s+/g, " ")
+            .trim();
+        } else if (provTag === "Text") {
+          // Extract text content with preserved order
+          const text = extractTextFromPreserved(provChildren)
+            .replace(/\s+/g, " ")
+            .trim();
+          if (text) {
+            textParts.push(text);
+          }
+        }
+      }
+
+      const fullText = textParts.join(" ").trim();
+      if (fullText) {
+        results.push({
+          text: fullText,
+          marginalNote: marginalNote || undefined,
+        });
+      }
+    }
+  }
+}
+
+// =============================================================================
+// TREATY TEXT EXTRACTION
+// =============================================================================
+
+/**
+ * Treaty definition with corrected text order.
+ */
+export type TreatyDefinitionText = {
+  term: string;
+  definition: string;
+};
+
+/**
+ * Treaty content with corrected text order.
+ * Matches the TreatyContent type from schema but with corrected text.
+ */
+export type TreatyContentText = {
+  title?: string;
+  text: string;
+  definitions?: TreatyDefinitionText[];
+};
+
+/**
+ * Extract treaty content with correct text order from pre-parsed XML data.
+ * Uses preserveOrder=true to maintain correct text order in mixed content.
+ *
+ * Returns treaty content array for the document, or undefined if no treaties.
+ *
+ * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
+ */
+export function extractTreaties(
+  parsed: PreservedOrderData
+): TreatyContentText[] | undefined {
+  const results: TreatyContentText[] = [];
+  walkForTreaties(parsed, results);
+
+  return results.length > 0 ? results : undefined;
+}
+
+/**
+ * Walk preserved-order structure to find Treaty/Convention elements.
+ */
+function walkForTreaties(items: unknown[], results: TreatyContentText[]): void {
+  if (!Array.isArray(items)) {
+    return;
+  }
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const children = Array.isArray(value) ? value : [];
+
+    // Treaties can be nested in Schedule elements
+    if (tag === "Schedule") {
+      walkForTreaties(children, results);
+      continue;
+    }
+
+    // Look for treaty-like content (multiple tag names used in legislation XML)
+    if (
+      tag === "TreatyAgreement" ||
+      tag === "Convention" ||
+      tag === "Agreement" ||
+      tag === "ConventionAgreementTreaty"
+    ) {
+      const treaty = extractTreatyContent(children);
+      if (treaty) {
+        results.push(treaty);
+      }
+      continue;
+    }
+
+    // Recurse into container elements
+    if (children.length > 0) {
+      walkForTreaties(children, results);
+    }
+  }
+}
+
+/**
+ * Extract content from a treaty/convention element.
+ */
+function extractTreatyContent(children: unknown[]): TreatyContentText | null {
+  let title: string | undefined;
+  const textParts: string[] = [];
+  const definitions: TreatyDefinitionText[] = [];
+
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const tagChildren = Array.isArray(value) ? value : [];
+
+    if (tag === "Heading") {
+      // Extract title from first heading
+      if (!title) {
+        title = extractTextFromPreserved(tagChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+    } else if (tag === "Definition") {
+      // Extract definition with preserved order
+      const def = extractTreatyDefinition(tagChildren);
+      if (def) {
+        definitions.push(def);
+      }
+    } else if (tag === "Text" || tag === "Provision" || tag === "Article") {
+      // Extract text content
+      const text = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text) {
+        textParts.push(text);
+      }
+    } else if (tagChildren.length > 0) {
+      // Recurse to find nested content
+      const nested = extractTreatyContent(tagChildren);
+      if (nested) {
+        if (!title && nested.title) {
+          title = nested.title;
+        }
+        if (nested.text) {
+          textParts.push(nested.text);
+        }
+        if (nested.definitions) {
+          definitions.push(...nested.definitions);
+        }
+      }
+    }
+  }
+
+  const fullText = textParts.join(" ").trim();
+  if (!fullText && definitions.length === 0) {
+    return null;
+  }
+
+  return {
+    title,
+    text: fullText,
+    definitions: definitions.length > 0 ? definitions : undefined,
+  };
+}
+
+/**
+ * Extract a single treaty definition.
+ */
+function extractTreatyDefinition(
+  children: unknown[]
+): TreatyDefinitionText | null {
+  let term = "";
+  let definition = "";
+
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    const value = obj[tag];
+    const tagChildren = Array.isArray(value) ? value : [];
+
+    if (tag === "Text") {
+      // Look for DefinedTermEn/Fr within Text
+      for (const textChild of tagChildren) {
+        if (!textChild || typeof textChild !== "object") {
+          continue;
+        }
+        const textObj = textChild as Record<string, unknown>;
+        const textKeys = Object.keys(textObj).filter((k) => k !== ":@");
+        if (textKeys.length === 0) {
+          continue;
+        }
+
+        const textTag = textKeys[0];
+        const textValue = textObj[textTag];
+        const textTagChildren = Array.isArray(textValue) ? textValue : [];
+
+        if (textTag === "DefinedTermEn" || textTag === "DefinedTermFr") {
+          term = extractTextFromPreserved(textTagChildren)
+            .replace(/\s+/g, " ")
+            .trim();
+        }
+      }
+
+      // Full definition text
+      definition = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+  }
+
+  if (!term || !definition) {
+    return null;
+  }
+
+  return { term, definition };
 }

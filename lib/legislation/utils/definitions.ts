@@ -6,7 +6,7 @@ import type {
 } from "../types";
 import { extractLimsMetadata } from "./metadata";
 import { normalizeTermForMatching } from "./normalization";
-import { extractTextContent } from "./text";
+import { extractTextContent, extractTextContentPreserved } from "./text";
 
 const AND_SECTIONS_REGEX =
   /in this section and (?:in )?sections?\s+(.+?)(?:\.|$)/i;
@@ -544,7 +544,9 @@ export function extractDefinedTermFromDefinition(
   }
 
   // Full definition text (shared by all terms in this Definition)
-  const definition = extractTextContent(textEl);
+  // Use extractTextContentPreserved to maintain document order for mixed content
+  // (text interspersed with elements like XRefExternal)
+  const definition = extractTextContentPreserved(textEl);
 
   // Default scope if not provided
   const defaultScopeType: DefinitionScopeType = actId ? "act" : "regulation";

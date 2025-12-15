@@ -15,9 +15,10 @@ import type {
   TableOfProvisionsEntry,
 } from "../types";
 import { parseDate, parseDateElement } from "./dates";
+import { extractHeadingComponents } from "./heading";
 import { extractLimsMetadata } from "./metadata";
 import { extractInternalReferences } from "./references";
-import { extractHtmlContent, extractTextContent } from "./text";
+import { extractTextContent } from "./text";
 
 /**
  * Extract historical notes from a Section element
@@ -378,7 +379,6 @@ export function extractPreamble(
  */
 export type EnactingClauseInfo = {
   text: string;
-  textHtml?: string;
   limsMetadata?: LimsMetadata;
   formattingAttributes?: FormattingAttributes;
   inForceStartDate?: string;
@@ -412,7 +412,6 @@ export function extractEnactingClause(
     if (directText) {
       return {
         text: directText,
-        textHtml: extractHtmlContent(enacts) || undefined,
         limsMetadata: extractLimsMetadata(enacts),
         inForceStartDate: parseDate(
           enacts["@_lims:inforce-start-date"] as string | undefined
@@ -431,7 +430,6 @@ export function extractEnactingClause(
     : [provisionElements];
 
   const texts: string[] = [];
-  const htmlParts: string[] = [];
   let formattingAttributes: FormattingAttributes | undefined;
   let limsMetadata: LimsMetadata | undefined;
   let inForceStartDate: string | undefined;
@@ -441,13 +439,9 @@ export function extractEnactingClause(
     if (typeof prov === "object" && prov !== null) {
       const provObj = prov as Record<string, unknown>;
       const text = extractTextContent(provObj);
-      const html = extractHtmlContent(provObj);
 
       if (text) {
         texts.push(text);
-      }
-      if (html) {
-        htmlParts.push(html);
       }
 
       // Capture metadata from first provision
@@ -500,7 +494,6 @@ export function extractEnactingClause(
 
   return {
     text: texts.join(" "),
-    textHtml: htmlParts.length > 0 ? htmlParts.join(" ") : undefined,
     limsMetadata,
     formattingAttributes,
     inForceStartDate,
@@ -582,7 +575,6 @@ export function extractPublicationItems(
 
     const obj = item as Record<string, unknown>;
     const content = extractTextContent(obj);
-    const contentHtml = extractHtmlContent(obj);
     const publicationRequirement =
       type === "notice"
         ? (obj["@_publication-requirement"] as
@@ -607,7 +599,6 @@ export function extractPublicationItems(
       results.push({
         type,
         content,
-        contentHtml: contentHtml || undefined,
         publicationRequirement,
         sourceSections: sourceSections.length > 0 ? sourceSections : undefined,
         limsMetadata,
@@ -750,10 +741,11 @@ export function extractTableOfProvisions(
         tp: Record<string, unknown>,
         level: number
       ) => {
-        const label = tp.Label ? extractTextContent(tp.Label) : "";
-        const title = tp.TitleText
-          ? extractTextContent(tp.TitleText)
-          : extractTextContent(tp);
+        const { label: labelText, title: titleText } =
+          extractHeadingComponents(tp);
+        const label = labelText || "";
+        // Fall back to full element text if no TitleText
+        const title = titleText || extractTextContent(tp);
 
         if (label || title) {
           entries.push({

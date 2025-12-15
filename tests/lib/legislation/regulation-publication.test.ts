@@ -41,8 +41,7 @@ test.describe("Regulation Recommendation/Notice extraction", () => {
       publicationRequirement: undefined,
     });
     expect(rec?.sourceSections).toEqual(["7"]);
-    // XRefInternal elements now render with xref-internal class and href
-    expect(rec?.contentHtml).toContain('class="xref');
+    expect(rec?.content).toContain("The Minister recommends action under");
   });
 
   test("captures Notice blocks with publication requirement, footnotes, and section linkage", () => {

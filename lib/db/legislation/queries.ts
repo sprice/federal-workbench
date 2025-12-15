@@ -49,7 +49,6 @@ export type SectionContent = {
   sectionLabel: string;
   marginalNote: string | null;
   content: string;
-  contentHtml: string | null;
   contentTree: ContentNode[] | null;
   sectionType: string | null;
   sectionOrder: number;
@@ -213,7 +212,6 @@ export function getSectionContentRange({
       sectionLabel: sections.sectionLabel,
       marginalNote: sections.marginalNote,
       content: sections.content,
-      contentHtml: sections.contentHtml,
       contentTree: sections.contentTree,
       sectionType: sections.sectionType,
       sectionOrder: sections.sectionOrder,
@@ -465,7 +463,6 @@ export function getSectionContentRangeForRegulation({
       sectionLabel: sections.sectionLabel,
       marginalNote: sections.marginalNote,
       content: sections.content,
-      contentHtml: sections.contentHtml,
       contentTree: sections.contentTree,
       sectionType: sections.sectionType,
       sectionOrder: sections.sectionOrder,
