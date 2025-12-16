@@ -146,14 +146,12 @@ function SectionContentDisplay({
   language: "en" | "fr";
   onNavigate?: (target: string) => void;
 }) {
-  // Handle repealed sections with a clean citation
   if (REPEALED_PATTERN.test(content)) {
     const citationMatch = content.match(REPEALED_CITATION_PATTERN);
     const citation = citationMatch ? citationMatch[0] : content;
     return <p className="text-muted-foreground italic">{citation}</p>;
   }
 
-  // Prefer contentTree when available (structured React rendering)
   if (contentTree && contentTree.length > 0) {
     return (
       <div className="legislation-content prose prose-sm dark:prose-invert max-w-none">
@@ -166,7 +164,6 @@ function SectionContentDisplay({
     );
   }
 
-  // Plain text fallback
   return (
     <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap">
       {content}
@@ -229,7 +226,6 @@ function SectionBadges({
 }) {
   const badges: Array<{ label: string; className: string }> = [];
 
-  // Status badges (only for non-default states)
   if (status === "repealed") {
     badges.push({
       label: language === "fr" ? "Abrogé" : "Repealed",
@@ -242,7 +238,6 @@ function SectionBadges({
     });
   }
 
-  // Section type badges (only for special types)
   if (sectionType === "amending") {
     badges.push({
       label: language === "fr" ? "Modificatif" : "Amending",
@@ -771,7 +766,6 @@ export function LegislationViewer({
     number | null
   >(null);
 
-  // Virtuoso ref for programmatic scrolling
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
   // Track pending section orders to prevent duplicate requests
@@ -786,10 +780,7 @@ export function LegislationViewer({
   // Track if initial load has happened to prevent duplicate initial loads
   const hasInitiallyLoaded = useRef(false);
 
-  // Debounce timer for range changes
   const rangeChangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // AbortController for cancelling in-flight requests
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Fetch TOC on mount (no initial content load - Virtuoso handles it)
@@ -835,12 +826,10 @@ export function LegislationViewer({
         return;
       }
 
-      // Find contiguous range bounds first, before marking as pending
       const sortedOrders = [...neededOrders].sort((a, b) => a - b);
       const startOrder = sortedOrders[0];
       const endOrder = sortedOrders.at(-1);
 
-      // Early return if no valid range (handles edge cases)
       if (startOrder === undefined || endOrder === undefined) {
         return;
       }
@@ -851,7 +840,6 @@ export function LegislationViewer({
       }
       setIsLoadingContent(true);
 
-      // Cancel any previous in-flight request
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -880,7 +868,6 @@ export function LegislationViewer({
         }
         console.error("Failed to load sections:", err);
       } finally {
-        // Remove from pending
         for (const order of neededOrders) {
           pendingSectionOrders.current.delete(order);
         }
@@ -893,7 +880,6 @@ export function LegislationViewer({
   // Handle range changes from Virtuoso - load visible sections with debouncing
   const handleRangeChanged = useCallback(
     (range: { startIndex: number; endIndex: number }) => {
-      // Clear any pending debounce
       if (rangeChangeTimer.current) {
         clearTimeout(rangeChangeTimer.current);
       }
@@ -911,7 +897,6 @@ export function LegislationViewer({
           range.endIndex + SECTION_BUFFER
         );
 
-        // Collect all section orders in the visible range
         const sectionOrders: number[] = [];
         for (let i = startIdx; i <= endIdx; i++) {
           sectionOrders.push(toc[i].sectionOrder);
@@ -923,7 +908,6 @@ export function LegislationViewer({
     [toc, loadSectionRange, metadata?.language, language]
   );
 
-  // Cleanup debounce timer on unmount
   useEffect(() => {
     return () => {
       if (rangeChangeTimer.current) {
@@ -946,7 +930,6 @@ export function LegislationViewer({
     loadSectionRange(sectionOrders, lang);
   }, [toc, metadata, language, loadSectionRange]);
 
-  // Reset initial load flag when document changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally reset when doc identity changes
   useEffect(() => {
     hasInitiallyLoaded.current = false;
@@ -962,21 +945,17 @@ export function LegislationViewer({
         return;
       }
 
-      // Pre-load the target section and buffer BEFORE scrolling
       const lang = metadata?.language || language;
       const startIdx = Math.max(0, tocIndex - SECTION_BUFFER);
       const endIdx = Math.min(toc.length - 1, tocIndex + SECTION_BUFFER);
 
-      // Collect section orders to load
       const sectionOrders: number[] = [];
       for (let i = startIdx; i <= endIdx; i++) {
         sectionOrders.push(toc[i].sectionOrder);
       }
 
-      // Wait for sections to load, then scroll (smoother experience)
       await loadSectionRange(sectionOrders, lang);
 
-      // Scroll instantly to the section (no animation through all sections)
       virtuosoRef.current?.scrollToIndex({
         index: tocIndex,
         align: "start",
@@ -986,7 +965,6 @@ export function LegislationViewer({
     [toc, loadSectionRange, metadata?.language, language]
   );
 
-  // Handle internal cross-reference navigation (from XRefInternal in content)
   const handleInternalNavigation = useCallback(
     (target: string) => {
       const sectionMatch = target.match(SECTION_TARGET_PATTERN);
@@ -1006,7 +984,6 @@ export function LegislationViewer({
     [toc, handleSectionClick]
   );
 
-  // Get display section (loaded content or placeholder)
   const getDisplaySection = useCallback(
     (index: number): DisplaySection => {
       const tocItem = toc[index];

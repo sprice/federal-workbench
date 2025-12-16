@@ -55,13 +55,11 @@ function parseDefinition(
   englishTerm: string,
   rawDefinition: string
 ): { frenchTerm: string | null; definition: string } {
-  // Clean up the raw definition first
   const cleaned = rawDefinition
-    .replace(TRAILING_PARENS_PATTERN, "") // Remove trailing "()"
-    .replace(MULTI_SPACE_PATTERN, " ") // Normalize spaces
+    .replace(TRAILING_PARENS_PATTERN, "")
+    .replace(MULTI_SPACE_PATTERN, " ")
     .trim();
 
-  // Look for " means " to split the definition
   const meansMatch = cleaned.match(MEANS_PATTERN);
   if (!meansMatch) {
     return { frenchTerm: null, definition: cleaned };
@@ -69,19 +67,12 @@ function parseDefinition(
 
   const beforeMeans = meansMatch[1];
   const afterMeans = meansMatch[2];
-
-  // Check if beforeMeans starts with the English term (case-insensitive)
   const termLower = englishTerm.toLowerCase();
   const beforeLower = beforeMeans.toLowerCase();
 
   if (beforeLower.startsWith(termLower)) {
-    // Extract what's between the English term and "means"
     let frenchPart = beforeMeans.slice(englishTerm.length).trim();
-
-    // Clean up common artifacts: leading numbers, stray punctuation
     frenchPart = frenchPart.replace(LEADING_NUMBER_PATTERN, "").trim();
-
-    // Capitalize the definition after "means"
     const capitalizedDef =
       afterMeans.charAt(0).toUpperCase() + afterMeans.slice(1);
     const cleanDef = capitalizedDef.replace(TRAILING_PARENS_PATTERN, "").trim();
@@ -96,7 +87,6 @@ function parseDefinition(
     return { frenchTerm: null, definition: cleanDef };
   }
 
-  // Fallback: couldn't parse, return cleaned definition
   return { frenchTerm: null, definition: cleaned };
 }
 
@@ -235,7 +225,6 @@ export function DefinedTermsPanel({
       setError(null);
 
       try {
-        // Check cache first
         const cached = termsCache.get(cacheKey);
         if (cached) {
           // If it's a promise, await it; if it's data, use directly
@@ -267,19 +256,15 @@ export function DefinedTermsPanel({
           return data.terms;
         })();
 
-        // Store the promise in cache
         termsCache.set(cacheKey, fetchPromise);
 
         const fetchedTerms = await fetchPromise;
-
-        // Replace promise with resolved data in cache
         termsCache.set(cacheKey, fetchedTerms);
 
         if (!cancelled) {
           setTerms(fetchedTerms);
         }
       } catch (err) {
-        // Remove failed request from cache
         termsCache.delete(cacheKey);
         if (!cancelled) {
           setError(

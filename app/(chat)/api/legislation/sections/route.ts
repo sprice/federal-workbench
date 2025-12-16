@@ -48,7 +48,6 @@ export async function GET(request: NextRequest) {
 
   const language = isValidLanguage(languageParam) ? languageParam : "en";
 
-  // Handle regulation requests
   if (docType === "regulation") {
     if (!docId) {
       return Response.json(
@@ -76,7 +75,6 @@ export async function GET(request: NextRequest) {
     return Response.json({ ...result, docType: "regulation" });
   }
 
-  // Handle act requests (default)
   const effectiveActId = docId || actId;
 
   if (!effectiveActId) {

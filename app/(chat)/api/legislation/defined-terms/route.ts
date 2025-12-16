@@ -40,7 +40,6 @@ export async function GET(request: NextRequest) {
   const sectionLabel = searchParams.get("sectionLabel");
   const partLabel = searchParams.get("partLabel") ?? undefined;
 
-  // Validate docType with proper type guard
   if (docTypeParam !== "act" && docTypeParam !== "regulation") {
     return Response.json(
       { error: "Invalid docType, must be 'act' or 'regulation'" },
@@ -62,7 +61,6 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Validate sectionLabel and partLabel format
   if (!isValidSectionLabel(sectionLabel)) {
     return Response.json(
       { error: "Invalid sectionLabel format" },
@@ -77,7 +75,6 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Validate document ID format
   if (docType === "regulation") {
     if (!isValidRegulationId(docId)) {
       return Response.json(

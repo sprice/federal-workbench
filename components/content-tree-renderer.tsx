@@ -69,12 +69,10 @@ function renderNode(
   language: string,
   onNavigate?: (target: string) => void
 ): ReactNode {
-  // Handle text nodes
   if (node.type === "text") {
     return node.value;
   }
 
-  // Render children recursively
   const children =
     "children" in node && node.children
       ? node.children.map((child, i) =>
@@ -83,7 +81,6 @@ function renderNode(
       : null;
 
   switch (node.type) {
-    // Structure elements
     case "Label":
       return (
         <span className="label font-semibold" key={key}>
@@ -150,7 +147,6 @@ function renderNode(
         </div>
       );
 
-    // Terms and references
     case "DefinedTermEn":
     case "DefinedTermFr":
       return (
@@ -165,9 +161,6 @@ function renderNode(
         </span>
       );
     case "XRefExternal": {
-      // Only create links for acts/regulations that have a valid link attribute
-      // External references like "Designated Airspace Handbook" (reference-type="other")
-      // don't have links and should render as styled text, not broken anchors
       if (node.link) {
         const href = buildJusticeCanadaUrl(
           node.link,
@@ -187,7 +180,6 @@ function renderNode(
           </a>
         );
       }
-      // No link available - render as emphasized text (external publications, standards)
       return (
         <em className="text-foreground" key={key}>
           {children}
@@ -195,9 +187,7 @@ function renderNode(
       );
     }
     case "XRefInternal": {
-      // Target can be explicit attribute or extracted from children text
       const target = node.target || extractTextFromChildren(node.children);
-      // If we have a navigation handler and target, make it clickable
       if (onNavigate && target) {
         return (
           <button
@@ -210,7 +200,6 @@ function renderNode(
           </button>
         );
       }
-      // Fallback to plain text if no handler
       return (
         <span className="text-primary" key={key}>
           {children}
@@ -218,7 +207,6 @@ function renderNode(
       );
     }
 
-    // Text formatting
     case "Emphasis":
       if (node.style === "italic") {
         return (
@@ -254,7 +242,6 @@ function renderNode(
         </span>
       );
     case "FootnoteRef":
-      // Render as superscript letter (children contains "a", "b", "c" etc.)
       return (
         <sup className="text-primary" key={key}>
           {children}
@@ -265,7 +252,6 @@ function renderNode(
     case "PageBreak":
       return <hr className="my-4 border-dashed" key={key} />;
     case "FormBlank":
-      // FormBlank can have children (e.g., "A Justice of the Peace in and for <Leader/>")
       if (children && node.children && node.children.length > 0) {
         return (
           <span className="form-blank-with-content block text-center" key={key}>
@@ -275,7 +261,6 @@ function renderNode(
           </span>
         );
       }
-      // Simple blank line (no content)
       return (
         <span
           className="inline-block border-current border-b"
@@ -286,7 +271,6 @@ function renderNode(
         </span>
       );
     case "Fraction": {
-      // Look for Numerator and Denominator children for proper rendering
       const numerator = node.children?.find(
         (c) => "type" in c && c.type === "Numerator"
       );
@@ -307,7 +291,6 @@ function renderNode(
           </span>
         );
       }
-      // Fallback for simple fractions without Numerator/Denominator tags
       return (
         <span className="inline-fraction" key={key}>
           {children}
@@ -318,9 +301,7 @@ function renderNode(
     case "Denominator":
       return <span key={key}>{children}</span>;
     case "Leader": {
-      // Use explicit length if provided, otherwise default to 4em
       const width = node.length || "4em";
-      // Style "none" means no visible line (just space)
       const borderStyle =
         node.style === "none"
           ? "none"
@@ -372,7 +353,6 @@ function renderNode(
         </li>
       );
 
-    // Tables (CALS)
     case "TableGroup":
       return (
         <div className="table-group my-4 overflow-x-auto" key={key}>
@@ -380,8 +360,6 @@ function renderNode(
         </div>
       );
     case "Table": {
-      // Separate text/unknown children (for caption) from valid table children
-      // Valid table children: TGroup, THead, TBody, TFoot, ColSpec
       const tableChildren =
         "children" in node && node.children
           ? node.children.filter(
@@ -456,9 +434,8 @@ function renderNode(
       );
     }
     case "ColSpec":
-      return null; // Handled by table rendering logic
+      return null;
 
-    // Formulas and math
     case "FormulaGroup":
       return (
         <div className="formula-group my-4" key={key}>
@@ -501,18 +478,15 @@ function renderNode(
         </React.Fragment>
       );
     case "FormulaParagraph":
-      // Use div instead of p because FormulaParagraph can contain nested formulas (divs)
       return (
         <div className="formula-paragraph my-1" key={key}>
           {children}
         </div>
       );
 
-    // MathML - inject raw XML for browser math rendering
     case "MathML":
       return <MathMLRenderer display={node.display} key={key} raw={node.raw} />;
 
-    // Images
     case "ImageGroup":
       return (
         <figure className="image-group my-4" key={key}>
@@ -520,8 +494,6 @@ function renderNode(
         </figure>
       );
     case "Image":
-      // Use native img for legislation images - they need to display at natural size
-      // Next.js Image requires fixed dimensions which don't work well for formula images
       return node.source ? (
         // biome-ignore lint/nursery/useImageSize: legislation images need natural sizing
         // biome-ignore lint/performance/noImgElement: Next.js Image doesn't support variable sizes
@@ -539,7 +511,6 @@ function renderNode(
         </figcaption>
       );
 
-    // Bilingual content
     case "BilingualGroup":
       return (
         <div className="bilingual-group my-2 flex gap-4" key={key}>
@@ -559,7 +530,6 @@ function renderNode(
         </span>
       );
 
-    // Special content
     case "QuotedText":
       return (
         <blockquote
@@ -600,7 +570,6 @@ function renderNode(
         </div>
       );
     case "Heading": {
-      // Render heading with appropriate HTML tag based on level
       const level = "level" in node ? (node.level as number) : 3;
       const HeadingTag = `h${Math.min(Math.max(level + 1, 2), 6)}` as
         | "h2"
@@ -621,7 +590,6 @@ function renderNode(
         </span>
       );
 
-    // Metadata elements (marginal notes, historical notes, footnotes)
     case "MarginalNote":
       return (
         <aside
@@ -661,7 +629,6 @@ function renderNode(
         </aside>
       );
 
-    // Amending and container elements
     case "SectionPiece":
     case "AmendedText":
     case "AmendedContent":
@@ -675,12 +642,8 @@ function renderNode(
         </div>
       );
 
-    // Fallback for unhandled elements (including "Unknown" type)
-    // Using Fragment avoids invalid HTML nesting (e.g., <span> inside <table>)
     default:
-      // Handle Unknown type with specific tags
       if (node.type === "Unknown" && "tag" in node) {
-        // AlternateText: accessibility text for images - hide visually
         if (node.tag === "AlternateText") {
           return (
             <span className="sr-only" key={key}>
@@ -688,8 +651,6 @@ function renderNode(
             </span>
           );
         }
-        // Provisions: render as div with proper layout
-        // Check if this provision has a Label child (indicates it's a list item like (a), (b))
         if (node.tag === "Provision") {
           const hasLabel =
             node.children?.some(
@@ -699,8 +660,6 @@ function renderNode(
                   "tag" in child &&
                   child.tag === "Label")
             ) ?? false;
-          // Provisions with labels are indented list items
-          // Provisions without labels are block paragraphs
           return (
             <div
               className={
