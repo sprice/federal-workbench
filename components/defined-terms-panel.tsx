@@ -18,6 +18,24 @@ type DefinedTermsPanelProps = {
   partLabel?: string;
 };
 
+// Module-level cache for defined terms requests
+// Key: "docType:docId:language:sectionLabel:partLabel"
+// Value: Promise<DefinedTermItem[]> or DefinedTermItem[]
+const termsCache = new Map<
+  string,
+  Promise<DefinedTermItem[]> | DefinedTermItem[]
+>();
+
+function getCacheKey(opts: {
+  docType: string;
+  docId: string;
+  language: string;
+  sectionLabel: string;
+  partLabel?: string;
+}): string {
+  return `${opts.docType}:${opts.docId}:${opts.language}:${opts.sectionLabel}:${opts.partLabel || ""}`;
+}
+
 // Pre-compiled regex patterns for performance
 const TRAILING_PARENS_PATTERN = /\s*\(\s*\)\s*$/g;
 const MULTI_SPACE_PATTERN = /\s+/g;
@@ -204,32 +222,65 @@ export function DefinedTermsPanel({
 
   useEffect(() => {
     let cancelled = false;
+    const cacheKey = getCacheKey({
+      docType,
+      docId,
+      language,
+      sectionLabel,
+      partLabel,
+    });
 
     async function fetchTerms() {
       setIsLoading(true);
       setError(null);
+
       try {
-        const params = new URLSearchParams({
-          docType,
-          docId,
-          language,
-          sectionLabel,
-        });
-        if (partLabel) {
-          params.set("partLabel", partLabel);
+        // Check cache first
+        const cached = termsCache.get(cacheKey);
+        if (cached) {
+          // If it's a promise, await it; if it's data, use directly
+          const cachedTerms = await cached;
+          if (!cancelled) {
+            setTerms(cachedTerms);
+            setIsLoading(false);
+          }
+          return;
         }
 
-        const res = await fetch(`/api/legislation/defined-terms?${params}`);
-        if (!res.ok) {
-          throw new Error(`Failed to fetch defined terms: ${res.status}`);
-        }
-        const data: DefinedTermsResponse = await res.json();
+        // Create the fetch promise and cache it immediately to prevent duplicate requests
+        const fetchPromise = (async () => {
+          const params = new URLSearchParams({
+            docType,
+            docId,
+            language,
+            sectionLabel,
+          });
+          if (partLabel) {
+            params.set("partLabel", partLabel);
+          }
 
-        // Only update state if this request wasn't cancelled
+          const res = await fetch(`/api/legislation/defined-terms?${params}`);
+          if (!res.ok) {
+            throw new Error(`Failed to fetch defined terms: ${res.status}`);
+          }
+          const data: DefinedTermsResponse = await res.json();
+          return data.terms;
+        })();
+
+        // Store the promise in cache
+        termsCache.set(cacheKey, fetchPromise);
+
+        const fetchedTerms = await fetchPromise;
+
+        // Replace promise with resolved data in cache
+        termsCache.set(cacheKey, fetchedTerms);
+
         if (!cancelled) {
-          setTerms(data.terms);
+          setTerms(fetchedTerms);
         }
       } catch (err) {
+        // Remove failed request from cache
+        termsCache.delete(cacheKey);
         if (!cancelled) {
           setError(
             err instanceof Error ? err.message : "Failed to load defined terms"

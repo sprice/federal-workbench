@@ -21,7 +21,7 @@ import {
   extractCrossReferences,
   extractInternalReferences,
 } from "./references";
-import { extractTextContent } from "./text";
+import { extractTextContentPreserved as extractTextContent } from "./text";
 
 /**
  * Context when processing elements inside a Schedule
@@ -265,8 +265,8 @@ export function extractScheduleListContent(
         const internalReferences = extractInternalReferences(fgObj);
         if (fgContent && fgContent.trim().length > 0) {
           sectionOrder++;
-          // Use "form" as sectionType for FormGroup elements
-          const sectionType = "form" as const;
+          // Inherit sectionType from schedule context (e.g., "amending" for NifProvs)
+          const sectionType = getSectionTypeForSchedule(scheduleContext);
           // Include sectionType and sectionOrder in ID for uniqueness
           const canonicalSectionId = `${idBase}/${language}/${sectionType}/${sectionOrder}/sch-${scheduleLabel.replace(/\s+/g, "-").toLowerCase()}-fg`;
 

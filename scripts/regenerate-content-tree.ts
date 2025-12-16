@@ -201,12 +201,15 @@ async function updateContentTree(
 
 /**
  * Update definitions from extracted content.
- * Uses limsId AND language to match definitions in the database.
+ *
+ * NOTE: Position-based extraction (sectionOrder/definitionOrder) doesn't include limsId,
+ * so this script cannot match definitions to database rows. The main import pipeline
+ * now handles content joining correctly during import.
  */
-async function updateDefinitions(
+function updateDefinitions(
   extracted: ExtractedContent,
-  language: "en" | "fr"
-): Promise<void> {
+  _language: "en" | "fr"
+): void {
   const definitionTexts = extracted.definitionTexts;
 
   if (definitionTexts.length === 0) {
@@ -215,62 +218,24 @@ async function updateDefinitions(
   }
 
   stats.definitionsExpected += definitionTexts.length;
+  stats.definitionsNotFound += definitionTexts.length;
 
-  if (dryRun) {
-    logVerbose(`[DRY RUN] Would update ${definitionTexts.length} definitions`);
-    stats.definitionsUpdated += definitionTexts.length;
-    return;
-  }
-
-  // Process in batches within a transaction
-  await client.begin(async (tx) => {
-    for (let i = 0; i < definitionTexts.length; i += UPDATE_BATCH_SIZE) {
-      const batch = definitionTexts.slice(i, i + UPDATE_BATCH_SIZE);
-
-      const limsIds = batch.map((d) => d.limsId);
-      const definitions = batch.map((d) => d.definitionText);
-
-      // Update by matching limsMetadata->>'id' AND language
-      // Use RETURNING to get the distinct limsIds that were actually updated
-      // (multiple rows can share the same limsId when a Definition has multiple terms)
-      const result = await tx`
-        UPDATE legislation.defined_terms AS dt
-        SET definition = data.definition
-        FROM unnest(${limsIds}::text[], ${definitions}::text[]) AS data(lims_id, definition)
-        WHERE dt.lims_metadata->>'id' = data.lims_id
-          AND dt.language = ${language}
-        RETURNING dt.lims_metadata->>'id' AS lims_id
-      `;
-
-      // Count distinct limsIds that were updated (not rows)
-      const updatedLimsIds = new Set(result.map((r) => r.lims_id));
-      stats.definitionsUpdated += updatedLimsIds.size;
-
-      if (updatedLimsIds.size < batch.length) {
-        const missing = batch.length - updatedLimsIds.size;
-        stats.definitionsNotFound += missing;
-        logVerbose(
-          `  Warning: ${missing} definitions not found in database (limsId mismatch)`
-        );
-      }
-
-      if (verbose && batch.length > 50) {
-        logVerbose(
-          `  Batch ${Math.floor(i / UPDATE_BATCH_SIZE) + 1}: updated ${updatedLimsIds.size} definitions (${result.length} rows)`
-        );
-      }
-    }
-  });
+  logVerbose(
+    `  Skipping ${definitionTexts.length} definitions - position-based content extraction doesn't include limsId for DB matching. Use main import pipeline.`
+  );
 }
 
 /**
  * Update section content from extracted content.
- * Uses limsId AND language to match sections in the database.
+ *
+ * NOTE: Position-based extraction (sectionOrder/definitionOrder) doesn't include limsId,
+ * so this script cannot match sections to database rows. The main import pipeline
+ * now handles content joining correctly during import.
  */
-async function updateSectionContent(
+function updateSectionContent(
   extracted: ExtractedContent,
-  language: "en" | "fr"
-): Promise<void> {
+  _language: "en" | "fr"
+): void {
   const sectionContents = extracted.sectionContents;
 
   if (sectionContents.length === 0) {
@@ -279,49 +244,11 @@ async function updateSectionContent(
   }
 
   stats.sectionContentExpected += sectionContents.length;
+  stats.sectionContentNotFound += sectionContents.length;
 
-  if (dryRun) {
-    logVerbose(
-      `[DRY RUN] Would update ${sectionContents.length} section contents`
-    );
-    stats.sectionContentUpdated += sectionContents.length;
-    return;
-  }
-
-  // Process in batches within a transaction
-  await client.begin(async (tx) => {
-    for (let i = 0; i < sectionContents.length; i += UPDATE_BATCH_SIZE) {
-      const batch = sectionContents.slice(i, i + UPDATE_BATCH_SIZE);
-
-      const limsIds = batch.map((s) => s.limsId);
-      const contents = batch.map((s) => s.content);
-
-      // Update by matching limsMetadata->>'id' AND language
-      const result = await tx`
-        UPDATE legislation.sections AS s
-        SET content = data.content
-        FROM unnest(${limsIds}::text[], ${contents}::text[]) AS data(lims_id, content)
-        WHERE s.lims_metadata->>'id' = data.lims_id
-          AND s.language = ${language}
-      `;
-
-      stats.sectionContentUpdated += result.count;
-
-      if (result.count < batch.length) {
-        const missing = batch.length - result.count;
-        stats.sectionContentNotFound += missing;
-        logVerbose(
-          `  Warning: ${missing} sections not found in database (limsId mismatch)`
-        );
-      }
-
-      if (verbose && batch.length > 50) {
-        logVerbose(
-          `  Batch ${Math.floor(i / UPDATE_BATCH_SIZE) + 1}: updated ${result.count} section contents`
-        );
-      }
-    }
-  });
+  logVerbose(
+    `  Skipping ${sectionContents.length} section contents - position-based content extraction doesn't include limsId for DB matching. Use main import pipeline.`
+  );
 }
 
 /**

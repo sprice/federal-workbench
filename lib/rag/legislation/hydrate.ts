@@ -1391,8 +1391,27 @@ export async function hydrateTopPerType(
   // Group by source type, keeping only first (top) result per type
   const byType = new Map<UISourceType, LegislationSearchResult>();
 
+  // Track first actId/regulationId found for fallback hydration
+  // This ensures "View Act" button appears even when search returns
+  // marginal_note, cross_reference, etc. instead of act/act_section
+  let firstActId: string | undefined;
+  let firstRegulationId: string | undefined;
+  let firstActResult: LegislationSearchResult | undefined;
+  let firstRegResult: LegislationSearchResult | undefined;
+
   for (const r of results) {
     const sourceType = r.metadata.sourceType as UISourceType;
+    const meta = r.metadata;
+
+    // Track first actId/regulationId for fallback
+    if (!firstActId && meta.actId) {
+      firstActId = meta.actId;
+      firstActResult = r;
+    }
+    if (!firstRegulationId && meta.regulationId) {
+      firstRegulationId = meta.regulationId;
+      firstRegResult = r;
+    }
 
     // Skip source types not in our UI set
     if (!UI_SOURCE_TYPES.includes(sourceType)) {
@@ -1405,22 +1424,62 @@ export async function hydrateTopPerType(
     }
 
     // For act/act_section, ensure we have actId
-    if (
-      (sourceType === "act" || sourceType === "act_section") &&
-      !r.metadata.actId
-    ) {
+    if ((sourceType === "act" || sourceType === "act_section") && !meta.actId) {
       continue;
     }
 
     // For regulation/regulation_section, ensure we have regulationId
     if (
       (sourceType === "regulation" || sourceType === "regulation_section") &&
-      !r.metadata.regulationId
+      !meta.regulationId
     ) {
       continue;
     }
 
     byType.set(sourceType, r);
+  }
+
+  // Fallback: if no act/act_section found but we have an actId, synthesize one
+  // This handles cases where search returns marginal_note, cross_reference, etc.
+  if (
+    !byType.has("act") &&
+    !byType.has("act_section") &&
+    firstActId &&
+    firstActResult
+  ) {
+    // Create a synthetic act_section result for hydration
+    const syntheticResult: LegislationSearchResult = {
+      ...firstActResult,
+      metadata: {
+        ...firstActResult.metadata,
+        sourceType: "act_section",
+        actId: firstActId,
+      },
+    };
+    byType.set("act_section", syntheticResult);
+    dbg("fallback: synthesized act_section for actId %s", firstActId);
+  }
+
+  // Same for regulations
+  if (
+    !byType.has("regulation") &&
+    !byType.has("regulation_section") &&
+    firstRegulationId &&
+    firstRegResult
+  ) {
+    const syntheticResult: LegislationSearchResult = {
+      ...firstRegResult,
+      metadata: {
+        ...firstRegResult.metadata,
+        sourceType: "regulation_section",
+        regulationId: firstRegulationId,
+      },
+    };
+    byType.set("regulation_section", syntheticResult);
+    dbg(
+      "fallback: synthesized regulation_section for regulationId %s",
+      firstRegulationId
+    );
   }
 
   // Hydrate all found types in parallel

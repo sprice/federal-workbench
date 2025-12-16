@@ -2,6 +2,7 @@ import type {
   AmendmentInfo,
   BillHistory,
   EnablingAuthorityInfo,
+  EnablingAuthorityOrder,
   FootnoteInfo,
   FormattingAttributes,
   HistoricalNoteItem,
@@ -288,6 +289,39 @@ export function extractRegulationMakerOrder(
   }
 
   return { regulationMaker, orderNumber, orderDate };
+}
+
+/**
+ * Extract enabling authority order from Order element
+ * This is the text granting authority to make a regulation
+ * (e.g., "Her Excellency the Governor General in Council... pursuant to")
+ */
+export function extractEnablingAuthorityOrder(
+  regulation: Record<string, unknown>
+): EnablingAuthorityOrder | undefined {
+  if (!regulation.Order) {
+    return;
+  }
+
+  const order = regulation.Order as Record<string, unknown>;
+
+  // Extract the text content
+  const text = extractTextContent(order);
+  if (!text) {
+    return;
+  }
+
+  // Extract footnotes (statute citations like "S.C. 2018, c. 12, s. 186")
+  const footnotes = extractFootnotes(order);
+
+  // Extract LIMS metadata from the Order element
+  const limsMetadata = extractLimsMetadata(order);
+
+  return {
+    text,
+    footnotes: footnotes.length > 0 ? footnotes : undefined,
+    limsMetadata,
+  };
 }
 
 /**

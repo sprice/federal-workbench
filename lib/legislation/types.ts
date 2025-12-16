@@ -35,12 +35,22 @@ export type ContentNode =
   | { type: "FootnoteRef"; id?: string; children: ContentNode[] }
   | { type: "Sup"; children: ContentNode[] }
   | { type: "Sub"; children: ContentNode[] }
+  // Additional inline formatting (MathML and formula related)
+  | { type: "Superscript"; children: ContentNode[] }
+  | { type: "Subscript"; children: ContentNode[] }
+  | { type: "Base"; children: ContentNode[] }
   // Inline formatting elements
   | { type: "LineBreak" }
   | { type: "PageBreak" }
-  | { type: "FormBlank"; width?: string }
+  | { type: "FormBlank"; width?: string; children?: ContentNode[] }
   | { type: "Fraction"; children: ContentNode[] }
-  | { type: "Leader"; style?: "solid" | "dot" | "dash" }
+  | { type: "Numerator"; children: ContentNode[] }
+  | { type: "Denominator"; children: ContentNode[] }
+  | {
+      type: "Leader";
+      style?: "solid" | "dot" | "dash" | "none";
+      length?: string;
+    }
   | { type: "Separator" }
   // Structure elements
   | { type: "Label"; children: ContentNode[] }
@@ -50,7 +60,10 @@ export type ContentNode =
   | { type: "Subparagraph"; children: ContentNode[] }
   | { type: "Clause"; children: ContentNode[] }
   | { type: "Subclause"; children: ContentNode[] }
+  | { type: "Subsubclause"; children: ContentNode[] }
   | { type: "Definition"; children: ContentNode[] }
+  | { type: "DefinitionEnOnly"; children: ContentNode[] }
+  | { type: "DefinitionFrOnly"; children: ContentNode[] }
   | { type: "List"; style?: string; children: ContentNode[] }
   | { type: "Item"; children: ContentNode[] }
   // Tables (CALS)
@@ -93,12 +106,37 @@ export type ContentNode =
   | { type: "QuotedText"; children: ContentNode[] }
   | { type: "CenteredText"; children: ContentNode[] }
   | { type: "Continued"; children: ContentNode[] }
+  | { type: "ContinuedSubparagraph"; children: ContentNode[] }
+  | { type: "ContinuedClause"; children: ContentNode[] }
+  | { type: "ContinuedSubclause"; children: ContentNode[] }
+  | { type: "ContinuedFormulaParagraph"; children: ContentNode[] }
+  | { type: "ContinuedSectionSubsection"; children: ContentNode[] }
+  | { type: "ContinuedParagraph"; children: ContentNode[] }
+  | { type: "ContinuedDefinition"; children: ContentNode[] }
   | { type: "FormGroup"; children: ContentNode[] }
   | { type: "Oath"; children: ContentNode[] }
   | { type: "ReadAsText"; children: ContentNode[] }
   | { type: "ScheduleFormHeading"; children: ContentNode[] }
   | { type: "Heading"; level?: number; children: ContentNode[] }
   | { type: "LeaderRightJustified"; children: ContentNode[] }
+  // Metadata elements (marginal notes, historical notes, footnotes)
+  | { type: "MarginalNote"; children: ContentNode[] }
+  | { type: "HistoricalNote"; children: ContentNode[] }
+  | { type: "HistoricalNoteSubItem"; children: ContentNode[] }
+  | {
+      type: "Footnote";
+      id?: string;
+      placement?: string;
+      children: ContentNode[];
+    }
+  // Amending and container elements
+  | { type: "SectionPiece"; children: ContentNode[] }
+  | { type: "AmendedText"; children: ContentNode[] }
+  | { type: "AmendedContent"; children: ContentNode[] }
+  | { type: "Reserved"; children: ContentNode[] }
+  | { type: "Order"; children: ContentNode[] }
+  | { type: "Recommendation"; children: ContentNode[] }
+  | { type: "Notice"; children: ContentNode[] }
   // Fallback for unhandled elements
   | { type: "Unknown"; tag: string; children: ContentNode[] };
 export type LegislationType = "act" | "regulation";
@@ -233,6 +271,21 @@ export type RegulationMakerInfo = {
   regulationMaker?: string;
   orderNumber?: string;
   orderDate?: string;
+};
+
+/**
+ * Enabling authority order content
+ * Contains the text granting authority to make a regulation
+ * (e.g., "Her Excellency the Governor General in Council... pursuant to")
+ *
+ * NOTE: This type is duplicated in schema.ts due to circular dependency.
+ * Keep both definitions in sync.
+ */
+export type EnablingAuthorityOrder = {
+  text: string;
+  contentTree?: ContentNode[];
+  footnotes?: FootnoteInfo[];
+  limsMetadata?: LimsMetadata;
 };
 
 /**
@@ -485,6 +538,8 @@ export type ParsedRegulation = {
   // LIMS tracking (language-specific!)
   limsMetadata?: LimsMetadata;
   regulationMakerOrder?: RegulationMakerInfo;
+  // Enabling authority order text ("Her Excellency the Governor General... pursuant to")
+  enablingAuthorityOrder?: EnablingAuthorityOrder;
   recentAmendments?: AmendmentInfo[];
   // Related provisions
   relatedProvisions?: RelatedProvisionInfo[];
@@ -578,6 +633,8 @@ export type ParsedDefinedTerm = {
   actId?: string;
   regulationId?: string;
   sectionLabel?: string;
+  // Document position for joining with preserved-order content
+  definitionOrder?: number;
   // Scope information (language-specific - EN and FR can have different scopes!)
   scopeType: DefinitionScopeType;
   scopeSections?: string[]; // Section labels where definition applies (null = entire doc)

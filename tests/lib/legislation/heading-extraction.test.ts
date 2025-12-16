@@ -3,11 +3,23 @@
  */
 
 import { expect, test } from "@playwright/test";
-import { parseActXml } from "@/lib/legislation/parser";
+import { XMLParser } from "fast-xml-parser";
+import { extractAllContent } from "@/lib/legislation/utils/content-tree";
 import {
   extractHeadingComponents,
   extractTitleText,
 } from "@/lib/legislation/utils/heading";
+
+/**
+ * Parser that preserves document order - essential for mixed content.
+ */
+const preserveOrderParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  preserveOrder: true,
+  trimValues: false,
+  textNodeName: "#text",
+});
 
 test.describe("Heading extraction utilities", () => {
   test("extractHeadingComponents extracts label and title", () => {
@@ -97,6 +109,14 @@ function createActXmlWithHeading(bodyContent: string): string {
 </Statute>`;
 }
 
+/**
+ * Helper to parse XML with preserved order and extract content
+ */
+function parseWithPreservedOrder(xml: string) {
+  const parsed = preserveOrderParser.parse(xml);
+  return extractAllContent(parsed);
+}
+
 test.describe("Heading in contentTree", () => {
   test("Heading elements appear in parser output", () => {
     const xml = createActXmlWithHeading(`
@@ -104,28 +124,24 @@ test.describe("Heading in contentTree", () => {
         <Label>PART I</Label>
         <TitleText>General Provisions</TitleText>
       </Heading>
-      <Section>
+      <Section lims:id="test-section-1" xmlns:lims="http://justice.gc.ca/lims">
         <Label>1</Label>
         <Text>Main section content</Text>
       </Section>
     `);
 
-    const result = parseActXml(xml, "en");
+    // Use preserved-order parsing to extract contentTrees including headings
+    const extractedContent = parseWithPreservedOrder(xml);
 
-    // Should have at least 2 entries - the Heading and the Section
-    expect(result.sections.length).toBeGreaterThanOrEqual(2);
-
-    // Find the heading entry
-    const headingSection = result.sections.find(
-      (s) => s.sectionLabel === "PART I General Provisions"
+    // The extracted content should include the heading
+    const headingEntry = extractedContent.contentTrees.find(
+      (ct) => ct.sectionLabel === "PART I General Provisions"
     );
-    expect(headingSection).toBeDefined();
+    expect(headingEntry).toBeDefined();
+    expect(headingEntry?.contentTree).toBeDefined();
+    expect(headingEntry?.contentTree?.length).toBeGreaterThan(0);
 
-    // The heading should have contentTree with a Heading node
-    expect(headingSection?.contentTree).toBeDefined();
-    expect(headingSection?.contentTree?.length).toBeGreaterThan(0);
-
-    const headingNode = headingSection?.contentTree?.[0];
+    const headingNode = headingEntry?.contentTree?.[0];
     expect(headingNode?.type).toBe("Heading");
   });
 
@@ -135,20 +151,20 @@ test.describe("Heading in contentTree", () => {
         <Label>Division A</Label>
         <TitleText>Special Rules</TitleText>
       </Heading>
-      <Section>
+      <Section lims:id="test-section-1" xmlns:lims="http://justice.gc.ca/lims">
         <Label>1</Label>
         <Text>Content</Text>
       </Section>
     `);
 
-    const result = parseActXml(xml, "en");
+    const extractedContent = parseWithPreservedOrder(xml);
 
-    const headingSection = result.sections.find(
-      (s) => s.sectionLabel === "Division A Special Rules"
+    const headingEntry = extractedContent.contentTrees.find(
+      (ct) => ct.sectionLabel === "Division A Special Rules"
     );
-    expect(headingSection).toBeDefined();
+    expect(headingEntry).toBeDefined();
 
-    const headingNode = headingSection?.contentTree?.[0] as {
+    const headingNode = headingEntry?.contentTree?.[0] as {
       type: string;
       level?: number;
     };
@@ -162,19 +178,19 @@ test.describe("Heading in contentTree", () => {
         <Label>PART I</Label>
         <TitleText>General</TitleText>
       </Heading>
-      <Section>
+      <Section lims:id="test-section-1" xmlns:lims="http://justice.gc.ca/lims">
         <Label>1</Label>
         <Text>Content</Text>
       </Section>
     `);
 
-    const result = parseActXml(xml, "en");
+    const extractedContent = parseWithPreservedOrder(xml);
 
-    const headingSection = result.sections.find((s) =>
-      s.sectionLabel?.includes("PART I")
+    const headingEntry = extractedContent.contentTrees.find((ct) =>
+      ct.sectionLabel?.includes("PART I")
     );
-    expect(headingSection?.hierarchyPath).toBeDefined();
-    expect(headingSection?.hierarchyPath).toContain("PART I General");
+    expect(headingEntry?.hierarchyPath).toBeDefined();
+    expect(headingEntry?.hierarchyPath).toContain("PART I General");
   });
 
   test("Multiple headings create multiple contentTree entries", () => {
@@ -183,7 +199,7 @@ test.describe("Heading in contentTree", () => {
         <Label>PART I</Label>
         <TitleText>First Part</TitleText>
       </Heading>
-      <Section>
+      <Section lims:id="test-section-1" xmlns:lims="http://justice.gc.ca/lims">
         <Label>1</Label>
         <Text>Content 1</Text>
       </Section>
@@ -191,22 +207,20 @@ test.describe("Heading in contentTree", () => {
         <Label>PART II</Label>
         <TitleText>Second Part</TitleText>
       </Heading>
-      <Section>
+      <Section lims:id="test-section-2" xmlns:lims="http://justice.gc.ca/lims">
         <Label>2</Label>
         <Text>Content 2</Text>
       </Section>
     `);
 
-    const result = parseActXml(xml, "en");
+    const extractedContent = parseWithPreservedOrder(xml);
 
-    // Should have entries for both headings plus sections
-    expect(result.sections.length).toBeGreaterThanOrEqual(4);
-
-    const part1 = result.sections.find((s) =>
-      s.sectionLabel?.includes("PART I")
+    // Should have contentTree entries for both headings
+    const part1 = extractedContent.contentTrees.find((ct) =>
+      ct.sectionLabel?.includes("PART I")
     );
-    const part2 = result.sections.find((s) =>
-      s.sectionLabel?.includes("PART II")
+    const part2 = extractedContent.contentTrees.find((ct) =>
+      ct.sectionLabel?.includes("PART II")
     );
 
     expect(part1).toBeDefined();

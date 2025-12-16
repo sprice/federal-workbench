@@ -254,6 +254,21 @@ export type RegulationMakerInfo = {
 };
 
 /**
+ * Enabling authority order content
+ * Contains the text granting authority to make a regulation
+ * (e.g., "Her Excellency the Governor General in Council... pursuant to")
+ *
+ * NOTE: This type is duplicated in types.ts due to circular dependency.
+ * Keep both definitions in sync.
+ */
+export type EnablingAuthorityOrder = {
+  text: string;
+  contentTree?: ContentNode[];
+  footnotes?: FootnoteInfo[];
+  limsMetadata?: LimsMetadata;
+};
+
+/**
  * Publication items specific to regulations (Recommendation/Notice blocks)
  */
 export type RegulationPublicationItem = {
@@ -320,6 +335,10 @@ export const regulations = legislationSchema.table(
     regulationMakerOrder: jsonb(
       "regulation_maker_order"
     ).$type<RegulationMakerInfo>(),
+    // Enabling authority order text ("Her Excellency... pursuant to")
+    enablingAuthorityOrder: jsonb(
+      "enabling_authority_order"
+    ).$type<EnablingAuthorityOrder>(),
     // Recent amendments list - language-specific citation formats
     recentAmendments: jsonb("recent_amendments").$type<AmendmentInfo[]>(),
     // Related provisions (cross-references to related content)

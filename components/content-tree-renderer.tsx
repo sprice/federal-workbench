@@ -1,6 +1,5 @@
 import parse from "html-react-parser";
 import { ExternalLinkIcon } from "lucide-react";
-import Image from "next/image";
 import React, { type ReactNode } from "react";
 import { buildJusticeCanadaUrl } from "@/lib/legislation/constants";
 import type { ContentNode } from "@/lib/legislation/types";
@@ -44,7 +43,11 @@ function MathMLRenderer({
   display?: "block" | "inline";
 }) {
   return (
-    <span className={display === "block" ? "my-2 block" : "inline"}>
+    <span
+      className={
+        display === "block" ? "my-2 block text-center" : "inline-block"
+      }
+    >
       {parse(raw)}
     </span>
   );
@@ -119,13 +122,28 @@ function renderNode(
           {children}
         </div>
       );
+    case "Subsubclause":
+      return (
+        <div className="subsubclause mt-1 ml-14" key={key}>
+          {children}
+        </div>
+      );
     case "Definition":
+    case "DefinitionEnOnly":
+    case "DefinitionFrOnly":
       return (
         <div className="definition mt-2" key={key}>
           {children}
         </div>
       );
     case "Continued":
+    case "ContinuedSubparagraph":
+    case "ContinuedClause":
+    case "ContinuedSubclause":
+    case "ContinuedFormulaParagraph":
+    case "ContinuedSectionSubsection":
+    case "ContinuedParagraph":
+    case "ContinuedDefinition":
       return (
         <div className="continued" key={key}>
           {children}
@@ -222,9 +240,13 @@ function renderNode(
         </strong>
       );
     case "Sup":
+    case "Superscript":
       return <sup key={key}>{children}</sup>;
     case "Sub":
+    case "Subscript":
       return <sub key={key}>{children}</sub>;
+    case "Base":
+      return <span key={key}>{children}</span>;
     case "Repealed":
       return (
         <span className="text-muted-foreground italic" key={key}>
@@ -232,9 +254,10 @@ function renderNode(
         </span>
       );
     case "FootnoteRef":
+      // Render as superscript letter (children contains "a", "b", "c" etc.)
       return (
-        <sup className="text-primary text-xs" key={key}>
-          [{node.id || children}]
+        <sup className="text-primary" key={key}>
+          {children}
         </sup>
       );
     case "LineBreak":
@@ -242,6 +265,17 @@ function renderNode(
     case "PageBreak":
       return <hr className="my-4 border-dashed" key={key} />;
     case "FormBlank":
+      // FormBlank can have children (e.g., "A Justice of the Peace in and for <Leader/>")
+      if (children && node.children && node.children.length > 0) {
+        return (
+          <span className="form-blank-with-content block text-center" key={key}>
+            <span className="inline-block border-current border-t pt-1">
+              {children}
+            </span>
+          </span>
+        );
+      }
+      // Simple blank line (no content)
       return (
         <span
           className="inline-block border-current border-b"
@@ -251,29 +285,64 @@ function renderNode(
           &nbsp;
         </span>
       );
-    case "Fraction":
+    case "Fraction": {
+      // Look for Numerator and Denominator children for proper rendering
+      const numerator = node.children?.find(
+        (c) => "type" in c && c.type === "Numerator"
+      );
+      const denominator = node.children?.find(
+        (c) => "type" in c && c.type === "Denominator"
+      );
+
+      if (numerator && denominator) {
+        return (
+          <span className="inline-fraction" key={key}>
+            <span className="numerator">
+              {renderNode(numerator, 0, language, onNavigate)}
+            </span>
+            <span className="mx-0.5">/</span>
+            <span className="denominator">
+              {renderNode(denominator, 1, language, onNavigate)}
+            </span>
+          </span>
+        );
+      }
+      // Fallback for simple fractions without Numerator/Denominator tags
       return (
         <span className="inline-fraction" key={key}>
           {children}
         </span>
       );
-    case "Leader":
+    }
+    case "Numerator":
+    case "Denominator":
+      return <span key={key}>{children}</span>;
+    case "Leader": {
+      // Use explicit length if provided, otherwise default to 4em
+      const width = node.length || "4em";
+      // Style "none" means no visible line (just space)
+      const borderStyle =
+        node.style === "none"
+          ? "none"
+          : node.style === "solid"
+            ? "1px solid currentColor"
+            : node.style === "dash"
+              ? "1px dashed currentColor"
+              : "1px dotted currentColor";
       return (
         <span
-          className="leader inline-block flex-1"
+          className="leader inline-block"
           key={key}
           style={{
-            borderBottom:
-              node.style === "solid"
-                ? "1px solid currentColor"
-                : node.style === "dash"
-                  ? "1px dashed currentColor"
-                  : "1px dotted currentColor",
+            width,
+            minWidth: width,
+            borderBottom: borderStyle,
           }}
         >
           &nbsp;
         </span>
       );
+    }
     case "Separator":
       return <hr className="my-2" key={key} />;
     case "Language":
@@ -310,15 +379,49 @@ function renderNode(
           {children}
         </div>
       );
-    case "Table":
+    case "Table": {
+      // Separate text/unknown children (for caption) from valid table children
+      // Valid table children: TGroup, THead, TBody, TFoot, ColSpec
+      const tableChildren =
+        "children" in node && node.children
+          ? node.children.filter(
+              (c) =>
+                "type" in c &&
+                ["TGroup", "THead", "TBody", "TFoot", "ColSpec"].includes(
+                  c.type
+                )
+            )
+          : [];
+      const captionChildren =
+        "children" in node && node.children
+          ? node.children.filter(
+              (c) =>
+                c.type === "text" ||
+                ("type" in c &&
+                  !["TGroup", "THead", "TBody", "TFoot", "ColSpec"].includes(
+                    c.type
+                  ))
+            )
+          : [];
+
+      const captionText = captionChildren
+        .map((c, i) => renderNode(c, i, language, onNavigate))
+        .filter(Boolean);
+
       return (
         <table
           className="min-w-full border-collapse border border-border text-sm"
           key={key}
         >
-          {children}
+          {captionText.length > 0 && (
+            <caption className="mb-2 text-left font-medium">
+              {captionText}
+            </caption>
+          )}
+          {tableChildren.map((c, i) => renderNode(c, i, language, onNavigate))}
         </table>
       );
+    }
     case "TGroup":
       return <React.Fragment key={key}>{children}</React.Fragment>;
     case "THead":
@@ -364,7 +467,7 @@ function renderNode(
       );
     case "Formula":
       return (
-        <div className="formula my-2 overflow-x-auto" key={key}>
+        <div className="formula my-2 overflow-x-auto text-center" key={key}>
           {children}
         </div>
       );
@@ -379,7 +482,7 @@ function renderNode(
       );
     case "FormulaConnector":
       return (
-        <p className="formula-connector my-1 text-center" key={key}>
+        <p className="formula-connector my-1 ml-4" key={key}>
           {children}
         </p>
       );
@@ -391,15 +494,18 @@ function renderNode(
       );
     case "FormulaTerm":
       return (
-        <var className="formula-term font-semibold italic" key={key}>
-          {children}
-        </var>
+        <React.Fragment key={key}>
+          <var className="formula-term font-semibold italic">
+            {children}
+          </var>{" "}
+        </React.Fragment>
       );
     case "FormulaParagraph":
+      // Use div instead of p because FormulaParagraph can contain nested formulas (divs)
       return (
-        <p className="formula-paragraph my-1" key={key}>
+        <div className="formula-paragraph my-1" key={key}>
           {children}
-        </p>
+        </div>
       );
 
     // MathML - inject raw XML for browser math rendering
@@ -414,17 +520,16 @@ function renderNode(
         </figure>
       );
     case "Image":
-      // Use Next.js Image with unoptimized for legislation images
-      // Width/height are placeholder values; CSS will control actual display
+      // Use native img for legislation images - they need to display at natural size
+      // Next.js Image requires fixed dimensions which don't work well for formula images
       return node.source ? (
-        <Image
+        // biome-ignore lint/nursery/useImageSize: legislation images need natural sizing
+        // biome-ignore lint/performance/noImgElement: Next.js Image doesn't support variable sizes
+        <img
           alt=""
-          className="legislation-image max-w-full"
-          height={400}
+          className="legislation-image inline-block max-w-full"
           key={key}
           src={`/legislation/images/${node.source}`}
-          unoptimized
-          width={600}
         />
       ) : null;
     case "Caption":
@@ -516,8 +621,100 @@ function renderNode(
         </span>
       );
 
+    // Metadata elements (marginal notes, historical notes, footnotes)
+    case "MarginalNote":
+      return (
+        <aside
+          className="marginal-note mb-2 border-amber-400 border-l-2 bg-amber-50 py-1 pr-2 pl-3 text-amber-900 text-sm dark:border-amber-600 dark:bg-amber-950/30 dark:text-amber-200"
+          key={key}
+        >
+          <span className="font-medium">Marginal Note: </span>
+          {children}
+        </aside>
+      );
+    case "HistoricalNote":
+      return (
+        <aside
+          className="historical-note mt-3 border-slate-300 border-l-2 bg-slate-50 py-1 pr-2 pl-3 text-slate-600 text-xs dark:border-slate-600 dark:bg-slate-900/30 dark:text-slate-400"
+          key={key}
+        >
+          <span className="font-medium">Historical Note: </span>
+          {children}
+        </aside>
+      );
+    case "HistoricalNoteSubItem":
+      return (
+        <span className="historical-note-subitem" key={key}>
+          {children}
+        </span>
+      );
+    case "Footnote":
+      return (
+        <aside
+          className="footnote mt-2 border-blue-300 border-l-2 bg-blue-50 py-1 pr-2 pl-3 text-blue-800 text-xs dark:border-blue-600 dark:bg-blue-950/30 dark:text-blue-300"
+          key={key}
+        >
+          <span className="font-medium">
+            Footnote{node.id ? ` [${node.id}]` : ""}: {""}
+          </span>
+          {children}
+        </aside>
+      );
+
+    // Amending and container elements
+    case "SectionPiece":
+    case "AmendedText":
+    case "AmendedContent":
+    case "Order":
+    case "Recommendation":
+    case "Notice":
+    case "Reserved":
+      return (
+        <div className="my-2" key={key}>
+          {children}
+        </div>
+      );
+
     // Fallback for unhandled elements (including "Unknown" type)
+    // Using Fragment avoids invalid HTML nesting (e.g., <span> inside <table>)
     default:
-      return <span key={key}>{children}</span>;
+      // Handle Unknown type with specific tags
+      if (node.type === "Unknown" && "tag" in node) {
+        // AlternateText: accessibility text for images - hide visually
+        if (node.tag === "AlternateText") {
+          return (
+            <span className="sr-only" key={key}>
+              {children}
+            </span>
+          );
+        }
+        // Provisions: render as div with proper layout
+        // Check if this provision has a Label child (indicates it's a list item like (a), (b))
+        if (node.tag === "Provision") {
+          const hasLabel =
+            node.children?.some(
+              (child) =>
+                child.type === "Label" ||
+                (child.type === "Unknown" &&
+                  "tag" in child &&
+                  child.tag === "Label")
+            ) ?? false;
+          // Provisions with labels are indented list items
+          // Provisions without labels are block paragraphs
+          return (
+            <div
+              className={
+                hasLabel
+                  ? "provision-item my-1 ml-6 flex items-baseline gap-1"
+                  : "provision-block my-2"
+              }
+              key={key}
+            >
+              {children}
+            </div>
+          );
+        }
+      }
+      return <React.Fragment key={key}>{children}</React.Fragment>;
   }
 }

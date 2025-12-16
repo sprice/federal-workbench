@@ -10,6 +10,7 @@ import {
   InfoIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type {
   ActMetadata,
   RegulationMetadata,
@@ -42,12 +43,86 @@ type LegislationViewerProps = {
   isLoading?: boolean;
 };
 
-// Number of sections to load around the target section
+/**
+ * Collapsible section for Related Provisions (amending/transitional sections)
+ * These are typically transitional provisions from amendment acts that don't
+ * belong in the main table of contents but are included for reference.
+ */
+function RelatedProvisionsSection({
+  items,
+  language,
+  selectedSectionOrder,
+  onSectionClick,
+}: {
+  items: SectionTocItem[];
+  language: "en" | "fr";
+  selectedSectionOrder: number | null;
+  onSectionClick: (order: number) => void;
+}) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  if (items.length === 0) {
+    return null;
+  }
+
+  const label =
+    language === "fr" ? "Dispositions connexes" : "Related Provisions";
+
+  return (
+    <div className="mt-4 border-muted border-t pt-3">
+      <button
+        className="flex w-full items-center justify-between px-2 py-1 font-semibold text-muted-foreground text-xs uppercase tracking-wide hover:text-foreground"
+        onClick={() => setIsExpanded(!isExpanded)}
+        type="button"
+      >
+        <span>
+          {label} ({items.length})
+        </span>
+        <ChevronRightIcon
+          className={cn(
+            "size-4 transition-transform",
+            isExpanded && "rotate-90"
+          )}
+        />
+      </button>
+
+      {isExpanded && (
+        <nav className="mt-1 space-y-0.5">
+          {items.map((item) => (
+            <button
+              className={cn(
+                "w-full rounded px-2 py-1 text-left text-xs transition-colors hover:bg-accent",
+                selectedSectionOrder === item.sectionOrder &&
+                  "bg-accent text-accent-foreground"
+              )}
+              key={item.id}
+              onClick={() => onSectionClick(item.sectionOrder)}
+              type="button"
+            >
+              <span className="block truncate text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  {item.sectionLabel}
+                </span>
+                {item.marginalNote && (
+                  <span className="ml-1">- {item.marginalNote}</span>
+                )}
+              </span>
+            </button>
+          ))}
+        </nav>
+      )}
+    </div>
+  );
+}
+
+// Number of sections to load around the visible range
 const SECTION_BUFFER = 5;
 // Initial sections to load on mount
-const INITIAL_SECTIONS_TO_LOAD = 20;
-// Debounce delay for intersection observer (ms)
-const INTERSECTION_DEBOUNCE_MS = 100;
+const INITIAL_SECTIONS_TO_LOAD = 30;
+// Virtuoso overscan - how many items to render outside viewport
+const VIRTUOSO_OVERSCAN = 400;
+// Debounce delay for range changes (ms)
+const RANGE_CHANGE_DEBOUNCE_MS = 150;
 
 type LoadedSection = SectionContent & { loaded: true };
 type PlaceholderSection = SectionTocItem & { loaded: false };
@@ -477,12 +552,183 @@ function SectionMetadataStrip({
   );
 }
 
+/**
+ * Document header for the legislation viewer
+ * Extracted as a standalone component to avoid nested component definition
+ */
+function DocumentHeader({
+  metadata,
+  docType,
+  language,
+}: {
+  metadata: DocumentMetadata;
+  docType: DocType;
+  language: "en" | "fr";
+}) {
+  const isRegulation = docType === "regulation";
+  const reg = isRegulation ? (metadata as RegulationMetadata) : null;
+  const act = isRegulation ? null : (metadata as ActMetadata);
+
+  return (
+    <header className="mb-4 px-6 pt-6">
+      <h1 className="font-bold text-2xl">{metadata.title}</h1>
+      {metadata.longTitle && metadata.longTitle !== metadata.title && (
+        <p className="mt-1 text-lg text-muted-foreground italic">
+          {metadata.longTitle}
+        </p>
+      )}
+
+      {/* Regulation-specific header info */}
+      {isRegulation && reg && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-0.5 font-medium text-blue-700 text-xs dark:text-blue-400">
+            {reg.instrumentNumber}
+          </span>
+          {reg.regulationType && (
+            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground text-xs">
+              {reg.regulationType}
+            </span>
+          )}
+          {reg.gazettePart && (
+            <span className="text-muted-foreground text-sm">
+              {language === "fr" ? "Gazette" : "Gazette"}: {reg.gazettePart}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-muted-foreground text-sm">
+        {metadata.status && (
+          <span>
+            <strong>{language === "fr" ? "Statut:" : "Status:"}</strong>{" "}
+            {metadata.status}
+          </span>
+        )}
+
+        {/* Act-specific dates */}
+        {act?.consolidationDate && (
+          <span>
+            <strong>
+              {language === "fr"
+                ? "Date de consolidation:"
+                : "Consolidation Date:"}
+            </strong>{" "}
+            {act.consolidationDate}
+          </span>
+        )}
+
+        {/* Regulation-specific dates */}
+        {reg?.registrationDate && (
+          <span>
+            <strong>{language === "fr" ? "Enregistré:" : "Registered:"}</strong>{" "}
+            {formatDate(reg.registrationDate)}
+          </span>
+        )}
+        {reg?.consolidationDate && (
+          <span>
+            <strong>
+              {language === "fr" ? "Consolidation:" : "Consolidation:"}
+            </strong>{" "}
+            {reg.consolidationDate}
+          </span>
+        )}
+        {reg?.lastAmendedDate && (
+          <span>
+            <strong>
+              {language === "fr" ? "Dernière modification:" : "Last Amended:"}
+            </strong>{" "}
+            {formatDate(reg.lastAmendedDate)}
+          </span>
+        )}
+      </div>
+
+      {/* Enabling Act (for regulations) */}
+      {reg?.enablingActId && (
+        <div className="mt-3 text-sm">
+          <strong className="text-muted-foreground">
+            {language === "fr" ? "Loi habilitante:" : "Enabling Act:"}
+          </strong>{" "}
+          <a
+            className="text-primary hover:underline"
+            href={buildJusticeCanadaUrl(reg.enablingActId, "act", language)}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            {reg.enablingActTitle || reg.enablingActId}
+            <ExternalLinkIcon className="ml-1 inline size-3" />
+          </a>
+        </div>
+      )}
+
+      {/* Enabling Authority Order (for regulations) */}
+      {reg?.enablingAuthorityOrder && (
+        <div className="mt-4 rounded-lg border bg-muted/30 p-4">
+          {reg.enablingAuthorityOrder.contentTree &&
+          reg.enablingAuthorityOrder.contentTree.length > 0 ? (
+            <div className="legislation-content prose prose-sm dark:prose-invert max-w-none">
+              <ContentTreeRenderer
+                language={language}
+                nodes={reg.enablingAuthorityOrder.contentTree}
+              />
+            </div>
+          ) : (
+            <p className="text-sm leading-relaxed">
+              {reg.enablingAuthorityOrder.text}
+            </p>
+          )}
+          {reg.enablingAuthorityOrder.footnotes &&
+            reg.enablingAuthorityOrder.footnotes.length > 0 && (
+              <ul className="mt-3 space-y-1 border-muted border-t pt-3 text-muted-foreground text-xs">
+                {reg.enablingAuthorityOrder.footnotes.map((fn) => {
+                  const parsed = parseAmendmentCitation(fn.text);
+                  const url = parsed
+                    ? buildAnnualStatuteUrl(
+                        parsed.year,
+                        parsed.chapter,
+                        language
+                      )
+                    : null;
+                  return (
+                    <li key={fn.id}>
+                      {url ? (
+                        <a
+                          className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
+                          href={url}
+                          rel="noopener noreferrer"
+                          target="_blank"
+                        >
+                          {fn.label && (
+                            <sup className="font-semibold">{fn.label}</sup>
+                          )}
+                          <span>{fn.text}</span>
+                          <ExternalLinkIcon className="size-3 shrink-0" />
+                        </a>
+                      ) : (
+                        <span className="flex gap-1">
+                          {fn.label && (
+                            <sup className="font-semibold">{fn.label}</sup>
+                          )}
+                          <span>{fn.text}</span>
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+        </div>
+      )}
+    </header>
+  );
+}
+
 type FetchSectionContentParams = {
   docType: DocType;
   docId: string;
   lang: string;
   startOrder: number;
   endOrder: number;
+  signal?: AbortSignal;
 };
 
 /**
@@ -494,9 +740,11 @@ async function fetchSectionContent({
   lang,
   startOrder,
   endOrder,
+  signal,
 }: FetchSectionContentParams): Promise<SectionContent[]> {
   const res = await fetch(
-    `/api/legislation/section-content?docType=${docType}&docId=${encodeURIComponent(docId)}&language=${lang}&startOrder=${startOrder}&endOrder=${endOrder}`
+    `/api/legislation/section-content?docType=${docType}&docId=${encodeURIComponent(docId)}&language=${lang}&startOrder=${startOrder}&endOrder=${endOrder}`,
+    { signal }
   );
   if (!res.ok) {
     throw new Error(`Failed to fetch section content: ${res.status}`);
@@ -523,26 +771,28 @@ export function LegislationViewer({
     number | null
   >(null);
 
-  const contentRef = useRef<HTMLDivElement>(null);
-  // Use a callback ref pattern to avoid O(n²) ref management
-  const sectionRefCallback =
-    useRef<(order: number, el: HTMLElement | null) => void>();
-  const sectionElements = useRef<Map<number, HTMLElement>>(new Map());
+  // Virtuoso ref for programmatic scrolling
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
 
-  // Track in-flight requests to prevent duplicates
-  const pendingRequests = useRef<Set<string>>(new Set());
-  // Debounce timer for intersection observer
-  const intersectionDebounceTimer = useRef<ReturnType<
-    typeof setTimeout
-  > | null>(null);
-  const pendingIntersections = useRef<Set<number>>(new Set());
+  // Track pending section orders to prevent duplicate requests
+  const pendingSectionOrders = useRef<Set<number>>(new Set());
 
-  // Stable array of loaded section orders for useMemo dependency
-  const loadedSectionOrders = useMemo(() => {
-    return Array.from(loadedSections.keys()).sort((a, b) => a - b);
+  // Ref for checking loaded sections without causing callback recreation
+  const loadedSectionsRef = useRef(loadedSections);
+  useEffect(() => {
+    loadedSectionsRef.current = loadedSections;
   }, [loadedSections]);
 
-  // Fetch TOC on mount
+  // Track if initial load has happened to prevent duplicate initial loads
+  const hasInitiallyLoaded = useRef(false);
+
+  // Debounce timer for range changes
+  const rangeChangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // AbortController for cancelling in-flight requests
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Fetch TOC on mount (no initial content load - Virtuoso handles it)
   useEffect(() => {
     async function fetchToc() {
       setIsLoadingToc(true);
@@ -555,41 +805,8 @@ export function LegislationViewer({
           throw new Error(`Failed to fetch sections: ${res.status}`);
         }
         const data = await res.json();
-        // Set metadata (either act or regulation)
         setMetadata(data.act || data.regulation);
         setToc(data.toc);
-
-        // Load initial sections inline
-        if (data.toc.length > 0) {
-          const lastSection = data.toc.at(-1);
-          const endOrder = Math.min(
-            data.toc[INITIAL_SECTIONS_TO_LOAD - 1]?.sectionOrder ??
-              lastSection?.sectionOrder ??
-              0,
-            lastSection?.sectionOrder ?? 0
-          );
-
-          const docLang = (data.act || data.regulation)?.language || language;
-          setIsLoadingContent(true);
-          try {
-            const sections = await fetchSectionContent({
-              docType,
-              docId,
-              lang: docLang,
-              startOrder: data.toc[0].sectionOrder,
-              endOrder,
-            });
-            setLoadedSections((prev) => {
-              const next = new Map(prev);
-              for (const section of sections) {
-                next.set(section.sectionOrder, section);
-              }
-              return next;
-            });
-          } finally {
-            setIsLoadingContent(false);
-          }
-        }
       } catch (err) {
         const label = docType === "regulation" ? "regulation" : "act";
         setError(
@@ -602,15 +819,43 @@ export function LegislationViewer({
     fetchToc();
   }, [docType, docId, language]);
 
+  // Load sections for a range - called when Virtuoso renders items
+  // Tracks individual section orders to prevent overlapping requests
+  // Returns a promise that resolves when loading is complete
   const loadSectionRange = useCallback(
-    async (startOrder: number, endOrder: number, lang: string) => {
-      const cacheKey = `${startOrder}-${endOrder}`;
-      if (pendingRequests.current.has(cacheKey)) {
+    async (sectionOrders: number[], lang: string): Promise<void> => {
+      // Filter out already loaded and pending sections using ref for stable deps
+      const neededOrders = sectionOrders.filter(
+        (order) =>
+          !loadedSectionsRef.current.has(order) &&
+          !pendingSectionOrders.current.has(order)
+      );
+
+      if (neededOrders.length === 0) {
         return;
       }
 
-      pendingRequests.current.add(cacheKey);
+      // Find contiguous range bounds first, before marking as pending
+      const sortedOrders = [...neededOrders].sort((a, b) => a - b);
+      const startOrder = sortedOrders[0];
+      const endOrder = sortedOrders.at(-1);
+
+      // Early return if no valid range (handles edge cases)
+      if (startOrder === undefined || endOrder === undefined) {
+        return;
+      }
+
+      // Mark all as pending AFTER validation
+      for (const order of neededOrders) {
+        pendingSectionOrders.current.add(order);
+      }
       setIsLoadingContent(true);
+
+      // Cancel any previous in-flight request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      abortControllerRef.current = new AbortController();
 
       try {
         const sections = await fetchSectionContent({
@@ -619,6 +864,7 @@ export function LegislationViewer({
           lang,
           startOrder,
           endOrder,
+          signal: abortControllerRef.current.signal,
         });
         setLoadedSections((prev) => {
           const next = new Map(prev);
@@ -628,15 +874,85 @@ export function LegislationViewer({
           return next;
         });
       } catch (err) {
+        // Ignore abort errors (expected when cancelling)
+        if (err instanceof Error && err.name === "AbortError") {
+          return;
+        }
         console.error("Failed to load sections:", err);
       } finally {
-        pendingRequests.current.delete(cacheKey);
+        // Remove from pending
+        for (const order of neededOrders) {
+          pendingSectionOrders.current.delete(order);
+        }
         setIsLoadingContent(false);
       }
     },
     [docType, docId]
   );
 
+  // Handle range changes from Virtuoso - load visible sections with debouncing
+  const handleRangeChanged = useCallback(
+    (range: { startIndex: number; endIndex: number }) => {
+      // Clear any pending debounce
+      if (rangeChangeTimer.current) {
+        clearTimeout(rangeChangeTimer.current);
+      }
+
+      // Debounce to prevent rapid-fire requests during scroll
+      rangeChangeTimer.current = setTimeout(() => {
+        if (toc.length === 0) {
+          return;
+        }
+
+        const lang = metadata?.language || language;
+        const startIdx = Math.max(0, range.startIndex - SECTION_BUFFER);
+        const endIdx = Math.min(
+          toc.length - 1,
+          range.endIndex + SECTION_BUFFER
+        );
+
+        // Collect all section orders in the visible range
+        const sectionOrders: number[] = [];
+        for (let i = startIdx; i <= endIdx; i++) {
+          sectionOrders.push(toc[i].sectionOrder);
+        }
+
+        loadSectionRange(sectionOrders, lang);
+      }, RANGE_CHANGE_DEBOUNCE_MS);
+    },
+    [toc, loadSectionRange, metadata?.language, language]
+  );
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (rangeChangeTimer.current) {
+        clearTimeout(rangeChangeTimer.current);
+      }
+    };
+  }, []);
+
+  // Load initial sections after TOC is fetched (runs once per document)
+  useEffect(() => {
+    if (toc.length === 0 || !metadata || hasInitiallyLoaded.current) {
+      return;
+    }
+
+    hasInitiallyLoaded.current = true;
+    const lang = (metadata.language as string) || language;
+    const initialCount = Math.min(INITIAL_SECTIONS_TO_LOAD, toc.length);
+    const sectionOrders = toc.slice(0, initialCount).map((s) => s.sectionOrder);
+
+    loadSectionRange(sectionOrders, lang);
+  }, [toc, metadata, language, loadSectionRange]);
+
+  // Reset initial load flag when document changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally reset when doc identity changes
+  useEffect(() => {
+    hasInitiallyLoaded.current = false;
+  }, [docType, docId, language]);
+
+  // Handle TOC click - load content then scroll for smooth experience
   const handleSectionClick = useCallback(
     async (sectionOrder: number) => {
       setSelectedSectionOrder(sectionOrder);
@@ -646,59 +962,36 @@ export function LegislationViewer({
         return;
       }
 
-      // Find the first unloaded section between start and target + buffer
-      // We need ALL sections above the target loaded to ensure accurate scroll position
-      const endIndex = Math.min(toc.length - 1, tocIndex + SECTION_BUFFER);
+      // Pre-load the target section and buffer BEFORE scrolling
+      const lang = metadata?.language || language;
+      const startIdx = Math.max(0, tocIndex - SECTION_BUFFER);
+      const endIdx = Math.min(toc.length - 1, tocIndex + SECTION_BUFFER);
 
-      // Find first unloaded section
-      let firstUnloadedIndex = -1;
-      for (let i = 0; i <= endIndex; i++) {
-        if (!loadedSections.has(toc[i].sectionOrder)) {
-          firstUnloadedIndex = i;
-          break;
-        }
+      // Collect section orders to load
+      const sectionOrders: number[] = [];
+      for (let i = startIdx; i <= endIdx; i++) {
+        sectionOrders.push(toc[i].sectionOrder);
       }
 
-      // Load all sections from first unloaded to target + buffer
-      // Chunk into batches of 100 (API limit)
-      if (firstUnloadedIndex !== -1) {
-        const lang = metadata?.language || language;
-        const CHUNK_SIZE = 100;
+      // Wait for sections to load, then scroll (smoother experience)
+      await loadSectionRange(sectionOrders, lang);
 
-        for (
-          let chunkStart = firstUnloadedIndex;
-          chunkStart <= endIndex;
-          chunkStart += CHUNK_SIZE
-        ) {
-          const chunkEnd = Math.min(chunkStart + CHUNK_SIZE - 1, endIndex);
-          await loadSectionRange(
-            toc[chunkStart].sectionOrder,
-            toc[chunkEnd].sectionOrder,
-            lang
-          );
-        }
-      }
-
-      // Scroll to section after content loads
-      requestAnimationFrame(() => {
-        const element = sectionElements.current.get(sectionOrder);
-        if (element) {
-          element.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
+      // Scroll instantly to the section (no animation through all sections)
+      virtuosoRef.current?.scrollToIndex({
+        index: tocIndex,
+        align: "start",
+        behavior: "auto",
       });
     },
-    [toc, loadedSections, loadSectionRange, metadata?.language, language]
+    [toc, loadSectionRange, metadata?.language, language]
   );
 
   // Handle internal cross-reference navigation (from XRefInternal in content)
   const handleInternalNavigation = useCallback(
     (target: string) => {
-      // Target could be like "section_4", "4", or a full lims ID
-      // Try to extract just the section number
       const sectionMatch = target.match(SECTION_TARGET_PATTERN);
       const sectionLabel = sectionMatch ? sectionMatch[1] : target;
 
-      // Find the section in TOC by label
       const tocItem = toc.find(
         (item) =>
           item.sectionLabel === sectionLabel ||
@@ -713,111 +1006,18 @@ export function LegislationViewer({
     [toc, handleSectionClick]
   );
 
-  // Build display sections - combine TOC with loaded content
-  // Use loadedSectionOrders for stable dependency tracking
-  const displaySections: DisplaySection[] = useMemo(() => {
-    const loadedSet = new Set(loadedSectionOrders);
-    return toc.map((tocItem) => {
-      if (loadedSet.has(tocItem.sectionOrder)) {
-        const loaded = loadedSections.get(tocItem.sectionOrder);
-        if (loaded) {
-          return { ...loaded, loaded: true as const };
-        }
+  // Get display section (loaded content or placeholder)
+  const getDisplaySection = useCallback(
+    (index: number): DisplaySection => {
+      const tocItem = toc[index];
+      const loaded = loadedSections.get(tocItem.sectionOrder);
+      if (loaded) {
+        return { ...loaded, loaded: true as const };
       }
       return { ...tocItem, loaded: false as const };
-    });
-  }, [toc, loadedSectionOrders, loadedSections]);
-
-  // Process pending intersections with debouncing
-  const processPendingIntersections = useCallback(() => {
-    if (pendingIntersections.current.size === 0) {
-      return;
-    }
-
-    const orders = Array.from(pendingIntersections.current);
-    pendingIntersections.current.clear();
-
-    // Find contiguous ranges to minimize requests
-    const unloadedOrders = orders.filter((order) => !loadedSections.has(order));
-    if (unloadedOrders.length === 0) {
-      return;
-    }
-
-    // For each unloaded section, load it with buffer
-    for (const order of unloadedOrders) {
-      const tocIndex = toc.findIndex((s) => s.sectionOrder === order);
-      if (tocIndex !== -1) {
-        const startIndex = Math.max(0, tocIndex - SECTION_BUFFER);
-        const endIndex = Math.min(toc.length - 1, tocIndex + SECTION_BUFFER);
-        loadSectionRange(
-          toc[startIndex].sectionOrder,
-          toc[endIndex].sectionOrder,
-          metadata?.language || language
-        );
-      }
-    }
-  }, [toc, loadedSections, loadSectionRange, metadata?.language, language]);
-
-  // Intersection observer for lazy loading as user scrolls
-  useEffect(() => {
-    if (toc.length === 0) {
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            const order = Number.parseInt(
-              entry.target.getAttribute("data-section-order") || "0",
-              10
-            );
-            if (order && !loadedSections.has(order)) {
-              pendingIntersections.current.add(order);
-            }
-          }
-        }
-
-        // Debounce processing of intersections
-        if (intersectionDebounceTimer.current) {
-          clearTimeout(intersectionDebounceTimer.current);
-        }
-        intersectionDebounceTimer.current = setTimeout(() => {
-          processPendingIntersections();
-        }, INTERSECTION_DEBOUNCE_MS);
-      },
-      {
-        root: contentRef.current,
-        rootMargin: "200px",
-        threshold: 0,
-      }
-    );
-
-    // Observe all section placeholders
-    for (const [order, element] of sectionElements.current) {
-      if (!loadedSections.has(order)) {
-        observer.observe(element);
-      }
-    }
-
-    return () => {
-      observer.disconnect();
-      if (intersectionDebounceTimer.current) {
-        clearTimeout(intersectionDebounceTimer.current);
-      }
-    };
-  }, [toc, loadedSections, processPendingIntersections]);
-
-  // Setup callback ref for efficient ref management
-  useEffect(() => {
-    sectionRefCallback.current = (order: number, el: HTMLElement | null) => {
-      if (el) {
-        sectionElements.current.set(order, el);
-      } else {
-        sectionElements.current.delete(order);
-      }
-    };
-  }, []);
+    },
+    [toc, loadedSections]
+  );
 
   const formatSectionHeader = (
     section: DisplaySection,
@@ -843,6 +1043,22 @@ export function LegislationViewer({
     return "h3";
   };
 
+  // Memoize Virtuoso components - react-virtuoso's API expects component functions
+  const virtuosoComponents = useMemo(
+    () => ({
+      // biome-ignore lint/correctness/noNestedComponentDefinitions: react-virtuoso API pattern
+      Header: () =>
+        metadata ? (
+          <DocumentHeader
+            docType={docType}
+            language={(metadata.language as "en" | "fr") || language}
+            metadata={metadata}
+          />
+        ) : null,
+    }),
+    [docType, language, metadata]
+  );
+
   if (externalLoading || isLoadingToc) {
     const label = docType === "regulation" ? "regulation" : "act";
     return (
@@ -865,180 +1081,112 @@ export function LegislationViewer({
   }
 
   const usedLang = (metadata.language as "en" | "fr") || language;
-  const isRegulation = docType === "regulation";
-  const reg = isRegulation ? (metadata as RegulationMetadata) : null;
-  const act = isRegulation ? null : (metadata as ActMetadata);
 
   return (
     <div className="flex h-full flex-row">
       {/* Section Navigation Sidebar */}
       <div className="w-64 shrink-0 overflow-y-auto border-r bg-muted/30 p-2">
         <div className="mb-2 px-2 font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-          {usedLang === "fr" ? "Sections" : "Sections"} ({toc.length})
+          {usedLang === "fr" ? "Sections" : "Sections"} (
+          {
+            toc.filter(
+              (s) =>
+                s.sectionType !== "amending" && s.sectionType !== "transitional"
+            ).length
+          }
+          )
         </div>
         <nav className="space-y-0.5">
-          {toc.map((item) => (
-            <button
-              className={cn(
-                "w-full rounded px-2 py-1 text-left text-sm transition-colors hover:bg-accent",
-                item.sectionType === "heading" && "font-semibold",
-                item.isRepealed && "text-muted-foreground",
-                selectedSectionOrder === item.sectionOrder &&
-                  "bg-accent text-accent-foreground"
-              )}
-              key={item.id}
-              onClick={() => handleSectionClick(item.sectionOrder)}
-              type="button"
-            >
-              <span className="block truncate">
-                {item.sectionType === "heading" ? (
-                  <span className="font-medium">{item.sectionLabel}</span>
-                ) : item.isRepealed ? (
-                  <span className="italic">
-                    {item.sectionLabel}
-                    <span className="ml-1">
-                      - {usedLang === "fr" ? "Abrogé" : "Repealed"}
-                    </span>
-                  </span>
-                ) : (
-                  <span>
-                    {item.sectionLabel}
-                    {item.marginalNote && (
-                      <span className="ml-1 text-muted-foreground">
-                        - {item.marginalNote}
-                      </span>
-                    )}
-                  </span>
+          {toc
+            .filter(
+              (item) =>
+                item.sectionType !== "amending" &&
+                item.sectionType !== "transitional"
+            )
+            .map((item) => (
+              <button
+                className={cn(
+                  "w-full rounded px-2 py-1 text-left text-sm transition-colors hover:bg-accent",
+                  item.sectionType === "heading" && "font-semibold",
+                  item.isRepealed && "text-muted-foreground",
+                  selectedSectionOrder === item.sectionOrder &&
+                    "bg-accent text-accent-foreground"
                 )}
-              </span>
-            </button>
-          ))}
+                key={item.id}
+                onClick={() => handleSectionClick(item.sectionOrder)}
+                type="button"
+              >
+                <span className="block truncate">
+                  {item.sectionType === "heading" ? (
+                    <span className="font-medium">{item.sectionLabel}</span>
+                  ) : item.isRepealed ? (
+                    <span className="italic">
+                      {item.sectionLabel}
+                      <span className="ml-1">
+                        - {usedLang === "fr" ? "Abrogé" : "Repealed"}
+                      </span>
+                    </span>
+                  ) : (
+                    <span>
+                      {item.sectionLabel}
+                      {item.marginalNote && (
+                        <span className="ml-1 text-muted-foreground">
+                          - {item.marginalNote}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </span>
+              </button>
+            ))}
         </nav>
+
+        {/* Related Provisions (amending/transitional sections) */}
+        {toc.some(
+          (item) =>
+            item.sectionType === "amending" ||
+            item.sectionType === "transitional"
+        ) && (
+          <RelatedProvisionsSection
+            items={toc.filter(
+              (item) =>
+                item.sectionType === "amending" ||
+                item.sectionType === "transitional"
+            )}
+            language={usedLang}
+            onSectionClick={handleSectionClick}
+            selectedSectionOrder={selectedSectionOrder}
+          />
+        )}
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto p-6" ref={contentRef}>
-        {/* Document Header */}
-        <header className="mb-8">
-          <h1 className="font-bold text-2xl">{metadata.title}</h1>
-          {metadata.longTitle && metadata.longTitle !== metadata.title && (
-            <p className="mt-1 text-lg text-muted-foreground italic">
-              {metadata.longTitle}
-            </p>
-          )}
-
-          {/* Regulation-specific header info */}
-          {isRegulation && reg && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-0.5 font-medium text-blue-700 text-xs dark:text-blue-400">
-                {reg.instrumentNumber}
-              </span>
-              {reg.regulationType && (
-                <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground text-xs">
-                  {reg.regulationType}
-                </span>
-              )}
-              {reg.gazettePart && (
-                <span className="text-muted-foreground text-sm">
-                  {usedLang === "fr" ? "Gazette" : "Gazette"}: {reg.gazettePart}
-                </span>
-              )}
-            </div>
-          )}
-
-          <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-muted-foreground text-sm">
-            {metadata.status && (
-              <span>
-                <strong>{usedLang === "fr" ? "Statut:" : "Status:"}</strong>{" "}
-                {metadata.status}
-              </span>
-            )}
-
-            {/* Act-specific dates */}
-            {act?.consolidationDate && (
-              <span>
-                <strong>
-                  {usedLang === "fr"
-                    ? "Date de consolidation:"
-                    : "Consolidation Date:"}
-                </strong>{" "}
-                {act.consolidationDate}
-              </span>
-            )}
-
-            {/* Regulation-specific dates */}
-            {reg?.registrationDate && (
-              <span>
-                <strong>
-                  {usedLang === "fr" ? "Enregistré:" : "Registered:"}
-                </strong>{" "}
-                {formatDate(reg.registrationDate)}
-              </span>
-            )}
-            {reg?.consolidationDate && (
-              <span>
-                <strong>
-                  {usedLang === "fr" ? "Consolidation:" : "Consolidation:"}
-                </strong>{" "}
-                {reg.consolidationDate}
-              </span>
-            )}
-            {reg?.lastAmendedDate && (
-              <span>
-                <strong>
-                  {usedLang === "fr"
-                    ? "Dernière modification:"
-                    : "Last Amended:"}
-                </strong>{" "}
-                {formatDate(reg.lastAmendedDate)}
-              </span>
-            )}
-          </div>
-
-          {/* Enabling Act (for regulations) */}
-          {reg?.enablingActId && (
-            <div className="mt-3 text-sm">
-              <strong className="text-muted-foreground">
-                {usedLang === "fr" ? "Loi habilitante:" : "Enabling Act:"}
-              </strong>{" "}
-              <a
-                className="text-primary hover:underline"
-                href={buildJusticeCanadaUrl(reg.enablingActId, "act", usedLang)}
-                rel="noopener noreferrer"
-                target="_blank"
-              >
-                {reg.enablingActTitle || reg.enablingActId}
-                <ExternalLinkIcon className="ml-1 inline size-3" />
-              </a>
-            </div>
-          )}
-        </header>
-
+      {/* Main Content Area - Virtualized */}
+      <div className="flex-1 overflow-hidden">
         {/* Loading indicator */}
         {isLoadingContent && (
-          <div className="fixed top-20 right-4 rounded bg-accent px-3 py-1 text-accent-foreground text-sm shadow">
+          <div className="fixed top-20 right-4 z-10 rounded bg-accent px-3 py-1 text-accent-foreground text-sm shadow">
             {usedLang === "fr" ? "Chargement..." : "Loading..."}
           </div>
         )}
 
-        {/* Sections */}
-        <div className="space-y-6">
-          {displaySections.map((section) => {
+        <Virtuoso
+          className="h-full"
+          components={virtuosoComponents}
+          data={toc}
+          increaseViewportBy={VIRTUOSO_OVERSCAN}
+          itemContent={(index) => {
+            const section = getDisplaySection(index);
             const HeaderTag = getSectionHeaderLevel(section.sectionType);
             const isLoaded = section.loaded;
 
             return (
               <article
                 className={cn(
-                  "scroll-mt-4",
+                  "scroll-mt-4 px-6 py-3",
                   selectedSectionOrder === section.sectionOrder &&
-                    "-mx-4 rounded-lg bg-accent/20 p-4"
+                    "bg-accent/20"
                 )}
                 data-section-order={section.sectionOrder}
-                key={section.id}
-                ref={(el) =>
-                  sectionRefCallback.current?.(section.sectionOrder, el)
-                }
               >
                 {/* Hierarchy breadcrumb - shows Part/Division context */}
                 {isLoaded && (
@@ -1103,8 +1251,10 @@ export function LegislationViewer({
                 )}
               </article>
             );
-          })}
-        </div>
+          }}
+          rangeChanged={handleRangeChanged}
+          ref={virtuosoRef}
+        />
       </div>
     </div>
   );

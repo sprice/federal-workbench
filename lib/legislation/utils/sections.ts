@@ -30,7 +30,7 @@ import {
   extractScheduleListContent,
   type ScheduleContext,
 } from "./schedules";
-import { extractTextContent } from "./text";
+import { extractTextContentPreserved as extractTextContent } from "./text";
 
 /**
  * Determine if a section element represents a repealed section.
@@ -88,6 +88,15 @@ type ParseSectionsOptions = {
 
 /**
  * Parse sections from Body element
+ *
+ * CRITICAL: The counter logic (sectionOrder, globalDefinitionOrder) MUST exactly match
+ * content-tree.ts. Position-based joining requires both passes to increment counters
+ * for the same elements in the same order.
+ *
+ * Key synchronization points:
+ * - sectionOrder: Increments for Section, Provision, schedule items
+ * - globalDefinitionOrder: Increments for Definition tags AND inline definitions
+ * - Section processing order: Subsections first, then Section-level content
  */
 export function parseSections(options: ParseSectionsOptions): {
   sections: ParsedSection[];
@@ -99,6 +108,7 @@ export function parseSections(options: ParseSectionsOptions): {
   const definedTerms: ParsedDefinedTerm[] = [];
   const crossReferences: ParsedCrossReference[] = [];
   let sectionOrder = 0;
+  let globalDefinitionOrder = 0;
   const currentHierarchy: string[] = [];
 
   const idBase = actId || regulationId || "unknown";
@@ -268,6 +278,7 @@ export function parseSections(options: ParseSectionsOptions): {
         : [];
 
       for (const def of subsecDefs) {
+        globalDefinitionOrder++;
         const terms = extractDefinedTermFromDefinition({
           defEl: def as Record<string, unknown>,
           language,
@@ -275,6 +286,7 @@ export function parseSections(options: ParseSectionsOptions): {
           regulationId,
           sectionLabel: label,
           scope,
+          definitionOrder: globalDefinitionOrder,
         });
         definedTerms.push(...terms);
       }
@@ -291,6 +303,7 @@ export function parseSections(options: ParseSectionsOptions): {
           textObj.DefinedTermFr !== undefined;
 
         if (hasInlineDefinedTerm) {
+          globalDefinitionOrder++;
           const syntheticDef = { Text: subsecObj.Text };
           const inlineTerms = extractDefinedTermFromDefinition({
             defEl: syntheticDef,
@@ -299,6 +312,7 @@ export function parseSections(options: ParseSectionsOptions): {
             regulationId,
             sectionLabel: label,
             scope,
+            definitionOrder: globalDefinitionOrder,
           });
           definedTerms.push(...inlineTerms);
         }
@@ -313,6 +327,7 @@ export function parseSections(options: ParseSectionsOptions): {
       : [];
 
     for (const def of definitions) {
+      globalDefinitionOrder++;
       const terms = extractDefinedTermFromDefinition({
         defEl: def as Record<string, unknown>,
         language,
@@ -320,6 +335,7 @@ export function parseSections(options: ParseSectionsOptions): {
         regulationId,
         sectionLabel: label,
         scope,
+        definitionOrder: globalDefinitionOrder,
       });
       definedTerms.push(...terms);
     }
@@ -341,6 +357,7 @@ export function parseSections(options: ParseSectionsOptions): {
         textObj.DefinedTermFr !== undefined;
 
       if (hasInlineDefinedTerm) {
+        globalDefinitionOrder++;
         // Create a synthetic Definition element wrapping the Text
         const syntheticDef = { Text: sectionEl.Text };
         const inlineTerms = extractDefinedTermFromDefinition({
@@ -350,6 +367,7 @@ export function parseSections(options: ParseSectionsOptions): {
           regulationId,
           sectionLabel: label,
           scope,
+          definitionOrder: globalDefinitionOrder,
         });
         definedTerms.push(...inlineTerms);
       }
@@ -487,6 +505,7 @@ export function parseSections(options: ParseSectionsOptions): {
               : [provObj.Definition]
             : [];
           for (const def of definitions) {
+            globalDefinitionOrder++;
             const terms = extractDefinedTermFromDefinition({
               defEl: def as Record<string, unknown>,
               language,
@@ -498,6 +517,7 @@ export function parseSections(options: ParseSectionsOptions): {
                 scopeSections: undefined,
                 scopeRawText: undefined,
               },
+              definitionOrder: globalDefinitionOrder,
             });
             definedTerms.push(...terms);
           }

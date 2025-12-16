@@ -54,6 +54,15 @@ export function parseFileWithPreservedOrder(
 // =============================================================================
 
 /**
+ * Enabling authority order content extracted with preserved document order.
+ * Contains the structured content tree for proper rendering.
+ */
+export type EnablingAuthorityOrderContent = {
+  contentTree: ContentNode[];
+  text: string;
+};
+
+/**
  * Result from combined extraction - all content types in one pass.
  * This is much faster than calling individual extraction functions.
  */
@@ -63,6 +72,7 @@ export type ExtractedContent = {
   definitionTexts: DefinitionText[];
   preamble: PreambleProvisionText[] | undefined;
   treaties: TreatyContentText[] | undefined;
+  enablingAuthorityOrder: EnablingAuthorityOrderContent | undefined;
 };
 
 /**
@@ -119,6 +129,94 @@ function detectDocumentLanguage(parsed: PreservedOrderData): "en" | "fr" {
 }
 
 /**
+ * Constant for Enacting Clause section order.
+ * Must match the value used in parser.ts when creating the enacts section.
+ */
+const ENACTS_SECTION_ORDER = 0;
+
+/**
+ * Check if children contain a Definition element.
+ */
+function hasDefinitionChild(children: unknown[]): boolean {
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length > 0 && keys[0] === "Definition") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Extract inline definition text from Section/Subsection children.
+ *
+ * Inline definitions are DefinedTermEn/Fr directly in Text elements without
+ * a Definition wrapper. This mirrors sections.ts lines 339-365.
+ *
+ * IMPORTANT: This function MUST stay synchronized with sections.ts inline
+ * definition handling. Both must detect and process the same cases.
+ *
+ * KEY BEHAVIOR: sections.ts uses `sectionEl.Text` directly. When there are
+ * multiple Text elements, fast-xml-parser returns an array, and checking
+ * `textObj.DefinedTermEn` on an array returns undefined. So sections.ts
+ * effectively SKIPS inline handling when there are multiple Text elements.
+ * We must match this behavior to keep counters aligned.
+ *
+ * @returns The Text element content if inline definition found, null otherwise
+ */
+function extractInlineDefinitionText(children: unknown[]): string | null {
+  // First, count Text elements - we only process if there's exactly one
+  // (matches sections.ts behavior which fails on arrays)
+  let textCount = 0;
+  let singleTextObj: Record<string, unknown> | null = null;
+
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length > 0 && keys[0] === "Text") {
+      textCount++;
+      if (textCount === 1) {
+        singleTextObj = obj;
+      }
+    }
+  }
+
+  // If not exactly one Text element, skip (matches sections.ts behavior)
+  if (textCount !== 1 || !singleTextObj) {
+    return null;
+  }
+
+  // Check the single Text element for DefinedTermEn or DefinedTermFr
+  const textValue = singleTextObj.Text;
+  const textChildren = Array.isArray(textValue) ? textValue : [];
+
+  for (const textChild of textChildren) {
+    if (!textChild || typeof textChild !== "object") {
+      continue;
+    }
+    const textObj = textChild as Record<string, unknown>;
+    const textKeys = Object.keys(textObj).filter((k) => k !== ":@");
+    if (textKeys.length === 0) {
+      continue;
+    }
+
+    if (textKeys[0] === "DefinedTermEn" || textKeys[0] === "DefinedTermFr") {
+      // Found inline definition - return the full Text content
+      return extractTextFromPreserved(textChildren).replace(/\s+/g, " ").trim();
+    }
+  }
+
+  return null;
+}
+
+/**
  * Extract all content types from pre-parsed XML data in a single tree walk.
  * This is ~5x faster than calling individual extraction functions.
  *
@@ -135,8 +233,14 @@ export function extractAllContent(
       definitionTexts: [],
       preamble: undefined,
       treaties: undefined,
+      enablingAuthorityOrder: undefined,
     },
-    state: { globalSectionOrder: 0, currentHierarchy: [], language },
+    state: {
+      globalSectionOrder: 0,
+      globalDefinitionOrder: 0,
+      currentHierarchy: [],
+      language,
+    },
     preambleProvisions: [],
     treatyContents: [],
   };
@@ -151,6 +255,37 @@ export function extractAllContent(
   }
 
   return ctx.result;
+}
+
+/**
+ * Extract marginal note text from preserved-order children.
+ * Finds the MarginalNote element and extracts its text content.
+ */
+function extractMarginalNoteFromPreserved(
+  children: unknown[]
+): string | undefined {
+  for (const child of children) {
+    if (!child || typeof child !== "object") {
+      continue;
+    }
+    const obj = child as Record<string, unknown>;
+    const keys = Object.keys(obj).filter((k) => k !== ":@");
+    if (keys.length === 0) {
+      continue;
+    }
+
+    const tag = keys[0];
+    if (tag === "MarginalNote") {
+      const mnChildren = obj[tag];
+      if (Array.isArray(mnChildren)) {
+        const text = extractTextFromPreserved(mnChildren)
+          .replace(/\s+/g, " ")
+          .trim();
+        return text || undefined;
+      }
+    }
+  }
+  return;
 }
 
 /**
@@ -194,6 +329,22 @@ function walkForAllContent(items: unknown[], ctx: ExtractionContext): void {
       continue;
     }
 
+    // Handle Order element (enabling authority order in regulations)
+    // Extract as content tree, do NOT process nested Provisions as sections
+    if (tag === "Order") {
+      const rawContentTree = convertPreservedToContentTree(children);
+      // Filter out Footnote nodes - they're extracted separately via extractEnablingAuthorityOrder
+      const contentTree = filterOutFootnotes(rawContentTree);
+      const text = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (contentTree.length > 0 || text) {
+        ctx.result.enablingAuthorityOrder = { contentTree, text };
+      }
+      // Don't recurse - Order Provisions are not sections
+      continue;
+    }
+
     // Handle Preamble
     if (tag === "Preamble") {
       extractPreambleProvisions(children, ctx.preambleProvisions);
@@ -214,21 +365,23 @@ function walkForAllContent(items: unknown[], ctx: ExtractionContext): void {
       continue;
     }
 
-    // Handle Definition elements
+    // Handle Definition elements - use position-based joining
     if (tag === "Definition") {
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
-      if (limsId) {
-        const definitionText = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (definitionText) {
-          ctx.result.definitionTexts.push({ limsId, definitionText });
-        }
+      ctx.state.globalDefinitionOrder++;
+      const definitionText = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (definitionText) {
+        ctx.result.definitionTexts.push({
+          definitionOrder: ctx.state.globalDefinitionOrder,
+          definitionText,
+        });
       }
       continue;
     }
 
     // Handle Enacts element (enacting clause)
+    // Enacts is assigned ENACTS_SECTION_ORDER (0) in the main parser
     if (tag === "Enacts") {
       const limsId = (attrs?.["@_lims:id"] as string) || null;
 
@@ -244,14 +397,15 @@ function walkForAllContent(items: unknown[], ctx: ExtractionContext): void {
         });
       }
 
-      // Section content (plain text)
-      if (limsId) {
-        const content = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (content) {
-          ctx.result.sectionContents.push({ limsId, content });
-        }
+      // Section content (plain text) - uses ENACTS_SECTION_ORDER constant
+      const content = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (content) {
+        ctx.result.sectionContents.push({
+          sectionOrder: ENACTS_SECTION_ORDER,
+          content,
+        });
       }
       continue;
     }
@@ -266,6 +420,9 @@ function walkForAllContent(items: unknown[], ctx: ExtractionContext): void {
     }
 
     // Handle Section elements
+    // IMPORTANT: Definition counter logic must match sections.ts EXACTLY.
+    // sections.ts order: (1) Subsection definitions+inline, (2) Section definitions, (3) Section inline.
+    // We must process in this order, NOT document order, for position-based joining to work.
     if (tag === "Section") {
       const limsId = (attrs?.["@_lims:id"] as string) || null;
       const label = extractLabelFromPreserved(children);
@@ -285,18 +442,115 @@ function walkForAllContent(items: unknown[], ctx: ExtractionContext): void {
           });
         }
 
-        // Section content (plain text)
-        if (limsId) {
-          const content = extractTextFromPreserved(children)
-            .replace(/\s+/g, " ")
-            .trim();
-          if (content) {
-            ctx.result.sectionContents.push({ limsId, content });
+        // Section content (plain text) and marginal note - always push with sectionOrder
+        const content = extractTextFromPreserved(children)
+          .replace(/\s+/g, " ")
+          .trim();
+        const marginalNote = extractMarginalNoteFromPreserved(children);
+        if (content) {
+          ctx.result.sectionContents.push({
+            sectionOrder: ctx.state.globalSectionOrder,
+            content,
+            marginalNote,
+          });
+        }
+      }
+
+      // Step 1: Process Subsections FIRST (mirrors sections.ts lines 236-311)
+      // This includes Subsection Definition children and Subsection inline definitions.
+      for (const child of children) {
+        if (!child || typeof child !== "object") {
+          continue;
+        }
+        const childObj = child as Record<string, unknown>;
+        const childKeys = Object.keys(childObj).filter((k) => k !== ":@");
+        if (childKeys.length > 0 && childKeys[0] === "Subsection") {
+          const subsecChildren = childObj.Subsection;
+          const subsecArr = Array.isArray(subsecChildren)
+            ? subsecChildren
+            : [subsecChildren];
+          // Recurse to find Definition elements in subsection
+          walkForAllContent(subsecArr, ctx);
+          // Check for Subsection inline definitions (only if no Definition children)
+          if (!hasDefinitionChild(subsecArr)) {
+            const inlineDefText = extractInlineDefinitionText(subsecArr);
+            if (inlineDefText) {
+              ctx.state.globalDefinitionOrder++;
+              ctx.result.definitionTexts.push({
+                definitionOrder: ctx.state.globalDefinitionOrder,
+                definitionText: inlineDefText,
+              });
+            }
           }
         }
       }
 
-      // Recurse to find nested definitions
+      // Step 2: Process Section-level Definition children (mirrors sections.ts lines 314-332)
+      // Handle Definition elements DIRECTLY here (don't rely on generic handler).
+      // For other elements, recurse into their children (old behavior) to avoid
+      // triggering Section/Provision/Schedule handlers for nested elements.
+      for (const child of children) {
+        if (!child || typeof child !== "object") {
+          continue;
+        }
+        const childObj = child as Record<string, unknown>;
+        const childKeys = Object.keys(childObj).filter((k) => k !== ":@");
+        if (childKeys.length === 0) {
+          continue;
+        }
+
+        const childTag = childKeys[0];
+        if (childTag === "Subsection") {
+          // Already handled in Step 1
+          continue;
+        }
+
+        if (childTag === "Definition") {
+          // Handle Definition directly - increment counter and extract text
+          // This mirrors what the Definition handler does, but avoids passing
+          // through walkForAllContent which could trigger other handlers.
+          ctx.state.globalDefinitionOrder++;
+          const defChildren = childObj.Definition;
+          const defArr = Array.isArray(defChildren) ? defChildren : [];
+          const definitionText = extractTextFromPreserved(defArr)
+            .replace(/\s+/g, " ")
+            .trim();
+          if (definitionText) {
+            ctx.result.definitionTexts.push({
+              definitionOrder: ctx.state.globalDefinitionOrder,
+              definitionText,
+            });
+          }
+        } else {
+          // For other elements, recurse into their CHILDREN (not the element itself)
+          // to find nested Definitions. This avoids triggering Section/Provision/Schedule
+          // handlers which would cause counter divergence with sections.ts.
+          const childValue = childObj[childTag];
+          const childArr = Array.isArray(childValue)
+            ? childValue
+            : [childValue];
+          walkForAllContent(childArr, ctx);
+        }
+      }
+
+      // Step 3: Handle Section-level inline definitions (mirrors sections.ts lines 339-365)
+      // Only check if Section has NO direct Definition children.
+      if (!hasDefinitionChild(children)) {
+        const inlineDefText = extractInlineDefinitionText(children);
+        if (inlineDefText) {
+          ctx.state.globalDefinitionOrder++;
+          ctx.result.definitionTexts.push({
+            definitionOrder: ctx.state.globalDefinitionOrder,
+            definitionText: inlineDefText,
+          });
+        }
+      }
+      continue;
+    }
+
+    // Subsection is handled within Section processing above to maintain correct order.
+    // If we encounter Subsection outside of Section context (shouldn't happen), just recurse.
+    if (tag === "Subsection") {
       walkForAllContent(children, ctx);
       continue;
     }
@@ -321,14 +575,17 @@ function walkForAllContent(items: unknown[], ctx: ExtractionContext): void {
         });
       }
 
-      // Section content (plain text)
-      if (limsId) {
-        const content = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (content) {
-          ctx.result.sectionContents.push({ limsId, content });
-        }
+      // Section content (plain text) and marginal note - always push with sectionOrder
+      const content = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
+      const marginalNote = extractMarginalNoteFromPreserved(children);
+      if (content) {
+        ctx.result.sectionContents.push({
+          sectionOrder: ctx.state.globalSectionOrder,
+          content,
+          marginalNote,
+        });
       }
 
       // Recurse to find nested definitions
@@ -369,7 +626,7 @@ function walkScheduleForTreatiesAndDefinitions(
     const tag = keys[0];
     const value = obj[tag];
     const children = Array.isArray(value) ? value : [];
-    const attrs = obj[":@"] as Record<string, unknown> | undefined;
+    const _attrs = obj[":@"] as Record<string, unknown> | undefined;
 
     // Handle Treaties within schedules (multiple tag names used in legislation XML)
     if (
@@ -385,16 +642,17 @@ function walkScheduleForTreatiesAndDefinitions(
       continue;
     }
 
-    // Handle Definition elements within schedules
+    // Handle Definition elements within schedules - use position-based joining
     if (tag === "Definition") {
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
-      if (limsId) {
-        const definitionText = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (definitionText) {
-          ctx.result.definitionTexts.push({ limsId, definitionText });
-        }
+      ctx.state.globalDefinitionOrder++;
+      const definitionText = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (definitionText) {
+        ctx.result.definitionTexts.push({
+          definitionOrder: ctx.state.globalDefinitionOrder,
+          definitionText,
+        });
       }
       continue;
     }
@@ -474,14 +732,15 @@ function walkScheduleItemsCombined(
         });
       }
 
-      // Section content
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (content) {
-          result.sectionContents.push({ limsId, content });
-        }
+      // Section content - always push with sectionOrder
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (content) {
+        result.sectionContents.push({
+          sectionOrder: state.globalSectionOrder,
+          content,
+        });
       }
 
       // Recurse for nested items
@@ -500,13 +759,14 @@ function walkScheduleItemsCombined(
         });
       }
 
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (content) {
-          result.sectionContents.push({ limsId, content });
-        }
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (content) {
+        result.sectionContents.push({
+          sectionOrder: state.globalSectionOrder,
+          content,
+        });
       }
     } else if (tag === "TableGroup") {
       const limsId = (attrs?.["@_lims:id"] as string) || null;
@@ -522,13 +782,14 @@ function walkScheduleItemsCombined(
         });
       }
 
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (content) {
-          result.sectionContents.push({ limsId, content });
-        }
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (content) {
+        result.sectionContents.push({
+          sectionOrder: state.globalSectionOrder,
+          content,
+        });
       }
     } else if (tag === "Provision") {
       const limsId = (attrs?.["@_lims:id"] as string) || null;
@@ -549,12 +810,38 @@ function walkScheduleItemsCombined(
         });
       }
 
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (content) {
-          result.sectionContents.push({ limsId, content });
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (content) {
+        result.sectionContents.push({
+          sectionOrder: state.globalSectionOrder,
+          content,
+        });
+      }
+
+      // Extract definitions from schedule Provisions (mirrors sections.ts Provision handling)
+      for (const provChild of tagChildren) {
+        if (!provChild || typeof provChild !== "object") {
+          continue;
+        }
+        const provChildObj = provChild as Record<string, unknown>;
+        const provChildKeys = Object.keys(provChildObj).filter(
+          (k) => k !== ":@"
+        );
+        if (provChildKeys.length > 0 && provChildKeys[0] === "Definition") {
+          state.globalDefinitionOrder++;
+          const defChildren = provChildObj.Definition;
+          const defArr = Array.isArray(defChildren) ? defChildren : [];
+          const definitionText = extractTextFromPreserved(defArr)
+            .replace(/\s+/g, " ")
+            .trim();
+          if (definitionText) {
+            result.definitionTexts.push({
+              definitionOrder: state.globalDefinitionOrder,
+              definitionText,
+            });
+          }
         }
       }
     } else if (tag === "Section") {
@@ -577,12 +864,118 @@ function walkScheduleItemsCombined(
         });
       }
 
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-        if (content) {
-          result.sectionContents.push({ limsId, content });
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (content) {
+        result.sectionContents.push({
+          sectionOrder: state.globalSectionOrder,
+          content,
+        });
+      }
+
+      // Extract definitions from schedule sections (mirrors sections.ts logic)
+      // Step 1: Process Subsections first (their definitions + inline)
+      for (const sectionChild of tagChildren) {
+        if (!sectionChild || typeof sectionChild !== "object") {
+          continue;
+        }
+        const sectionChildObj = sectionChild as Record<string, unknown>;
+        const sectionChildKeys = Object.keys(sectionChildObj).filter(
+          (k) => k !== ":@"
+        );
+        if (
+          sectionChildKeys.length > 0 &&
+          sectionChildKeys[0] === "Subsection"
+        ) {
+          const subsecChildren = sectionChildObj.Subsection;
+          const subsecArr = Array.isArray(subsecChildren)
+            ? subsecChildren
+            : [subsecChildren];
+
+          // Find Definition elements in subsection
+          for (const subsecChild of subsecArr) {
+            if (!subsecChild || typeof subsecChild !== "object") {
+              continue;
+            }
+            const subsecChildObj = subsecChild as Record<string, unknown>;
+            const subsecChildKeys = Object.keys(subsecChildObj).filter(
+              (k) => k !== ":@"
+            );
+            if (
+              subsecChildKeys.length > 0 &&
+              subsecChildKeys[0] === "Definition"
+            ) {
+              state.globalDefinitionOrder++;
+              const defChildren = subsecChildObj.Definition;
+              const defArr = Array.isArray(defChildren) ? defChildren : [];
+              const definitionText = extractTextFromPreserved(defArr)
+                .replace(/\s+/g, " ")
+                .trim();
+              if (definitionText) {
+                result.definitionTexts.push({
+                  definitionOrder: state.globalDefinitionOrder,
+                  definitionText,
+                });
+              }
+            }
+          }
+
+          // Check for Subsection inline definitions
+          if (!hasDefinitionChild(subsecArr)) {
+            const inlineDefText = extractInlineDefinitionText(subsecArr);
+            if (inlineDefText) {
+              state.globalDefinitionOrder++;
+              result.definitionTexts.push({
+                definitionOrder: state.globalDefinitionOrder,
+                definitionText: inlineDefText,
+              });
+            }
+          }
+        }
+      }
+
+      // Step 2: Process Section-level Definition children
+      for (const sectionChild of tagChildren) {
+        if (!sectionChild || typeof sectionChild !== "object") {
+          continue;
+        }
+        const sectionChildObj = sectionChild as Record<string, unknown>;
+        const sectionChildKeys = Object.keys(sectionChildObj).filter(
+          (k) => k !== ":@"
+        );
+        if (sectionChildKeys.length === 0) {
+          continue;
+        }
+        const childTag = sectionChildKeys[0];
+        if (childTag === "Subsection") {
+          continue; // Already handled in Step 1
+        }
+        if (childTag === "Definition") {
+          state.globalDefinitionOrder++;
+          const defChildren = sectionChildObj.Definition;
+          const defArr = Array.isArray(defChildren) ? defChildren : [];
+          const definitionText = extractTextFromPreserved(defArr)
+            .replace(/\s+/g, " ")
+            .trim();
+          if (definitionText) {
+            result.definitionTexts.push({
+              definitionOrder: state.globalDefinitionOrder,
+              definitionText,
+            });
+          }
+        }
+      }
+
+      // Step 3: Handle Section-level inline definitions
+      if (!hasDefinitionChild(tagChildren)) {
+        const inlineDefText = extractInlineDefinitionText(tagChildren);
+        if (inlineDefText) {
+          state.globalDefinitionOrder++;
+          result.definitionTexts.push({
+            definitionOrder: state.globalDefinitionOrder,
+            definitionText: inlineDefText,
+          });
         }
       }
     } else if (
@@ -591,7 +984,12 @@ function walkScheduleItemsCombined(
       tag === "Group" ||
       tag === "BillPiece" ||
       tag === "RegulationPiece" ||
-      tag === "RelatedOrNotInForce"
+      tag === "RelatedOrNotInForce" ||
+      tag === "SectionPiece" ||
+      tag === "Order" ||
+      tag === "Recommendation" ||
+      tag === "Notice" ||
+      tag === "AmendedText"
     ) {
       // Container elements - recurse into them (per LIMS2HTML.xsl patterns)
       walkScheduleItemsCombined(tagChildren, scheduleLabel, result, state);
@@ -613,10 +1011,15 @@ export type SectionContentTree = {
 /**
  * State for tracking position during parsing.
  *
- * The globalSectionOrder counter is used for fallback labels when elements don't have
- * explicit Label children (e.g., "Schedule I Item 157"). The primary join key is limsId
- * (Justice Canada's unique element ID), which is deterministic and order-independent.
- * The counter-based sectionLabel is only used as a fallback for rare elements without limsId.
+ * CRITICAL: The counter logic in this file MUST exactly match sections.ts.
+ * Position-based joining (sectionOrder, definitionOrder) is the PRIMARY join key.
+ * Both passes (structure extraction in sections.ts, content extraction here) must
+ * increment counters for the same elements in the same order.
+ *
+ * Key synchronization points:
+ * - globalSectionOrder: Increments for Section, Provision, schedule items
+ * - globalDefinitionOrder: Increments for Definition tags AND inline definitions
+ * - Section processing order: Subsections first, then Section-level content (mirrors sections.ts)
  */
 type ParserState = {
   /**
@@ -624,6 +1027,11 @@ type ParserState = {
    * Increments for ALL section types in document order.
    */
   globalSectionOrder: number;
+  /**
+   * Global definition order for position-based joining.
+   * Increments for each Definition element in document order.
+   */
+  globalDefinitionOrder: number;
   /**
    * Current hierarchy path (Part, Division, etc).
    * Updated when Heading elements are encountered.
@@ -650,6 +1058,7 @@ export function extractContentTrees(
   const language = detectDocumentLanguage(parsed);
   const state: ParserState = {
     globalSectionOrder: 0,
+    globalDefinitionOrder: 0,
     currentHierarchy: [],
     language,
   };
@@ -849,6 +1258,9 @@ function updateHierarchyFromHeading(
  * Extract text content from a preserveOrder structure.
  * Used for extracting Label/TitleText from Heading elements.
  * Recursively descends into child elements.
+ *
+ * Adds trailing spaces after certain elements (Label, Subsection, Paragraph)
+ * to ensure proper spacing in plain text output.
  */
 function extractTextFromPreserved(value: unknown): string {
   if (typeof value === "string") {
@@ -871,9 +1283,35 @@ function extractTextFromPreserved(value: unknown): string {
     // Recurse into child elements
     for (const key of Object.keys(obj)) {
       if (key !== ":@" && key !== "#text") {
+        // Skip elements that are metadata/supplementary, not main content:
+        // - Footnote: reference citations (e.g., "S.C. 1994, c. 44, s. 35")
+        // - MarginalNote: side headings extracted separately
+        // - HistoricalNote/HistoricalNoteSubItem: amendment history citations
+        // FootnoteRef markers (superscript a, b, c) are still included inline.
+        if (
+          key === "Footnote" ||
+          key === "MarginalNote" ||
+          key === "HistoricalNote" ||
+          key === "HistoricalNoteSubItem"
+        ) {
+          continue;
+        }
         const children = obj[key];
         if (Array.isArray(children)) {
-          text += extractTextFromPreserved(children);
+          const childText = extractTextFromPreserved(children);
+          text += childText;
+          // Add trailing space after Label elements and block-level elements
+          // to ensure proper spacing (e.g., "355 A person..." not "355A person...")
+          if (
+            childText &&
+            (key === "Label" ||
+              key === "Subsection" ||
+              key === "Paragraph" ||
+              key === "Subparagraph" ||
+              key === "Clause")
+          ) {
+            text += " ";
+          }
         }
       }
     }
@@ -1407,6 +1845,34 @@ function serializePreservedToXml(items: unknown[]): string {
 }
 
 /**
+ * Check if a node is a Footnote (either type "Footnote" or Unknown with tag "Footnote").
+ */
+function isFootnoteNode(node: ContentNode): boolean {
+  if (node.type === "Footnote") {
+    return true;
+  }
+  if (node.type === "Unknown" && "tag" in node && node.tag === "Footnote") {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Filter out Footnote nodes from a ContentNode tree.
+ * Used for Order contentTree where footnotes are extracted separately.
+ */
+function filterOutFootnotes(nodes: ContentNode[]): ContentNode[] {
+  return nodes
+    .filter((node) => !isFootnoteNode(node))
+    .map((node) => {
+      if ("children" in node && Array.isArray(node.children)) {
+        return { ...node, children: filterOutFootnotes(node.children) };
+      }
+      return node;
+    });
+}
+
+/**
  * Convert fast-xml-parser's preserveOrder structure to ContentNode[].
  */
 function convertPreservedToContentTree(items: unknown[]): ContentNode[] {
@@ -1521,6 +1987,13 @@ function convertTagToNode(
       return { type: "Sup", children };
     case "Sub":
       return { type: "Sub", children };
+    // Additional inline formatting (MathML and formula related)
+    case "Superscript":
+      return { type: "Superscript", children };
+    case "Subscript":
+      return { type: "Subscript", children };
+    case "Base":
+      return { type: "Base", children };
 
     // Inline formatting elements (self-closing)
     case "LineBreak":
@@ -1531,18 +2004,29 @@ function convertTagToNode(
       return {
         type: "FormBlank",
         width: attrs["@_width"] as string | undefined,
+        ...(children.length > 0 && { children }),
       };
     case "Fraction":
       return { type: "Fraction", children };
-    case "Leader":
+    case "Numerator":
+      return { type: "Numerator", children };
+    case "Denominator":
+      return { type: "Denominator", children };
+    case "Leader": {
+      // Style can be in @_leader or @_leader-pattern attribute
+      const style = (attrs["@_leader"] || attrs["@_leader-pattern"]) as
+        | "solid"
+        | "dot"
+        | "dash"
+        | "none"
+        | undefined;
+      const length = attrs["@_length"] as string | undefined;
       return {
         type: "Leader",
-        style: attrs["@_leader-pattern"] as
-          | "solid"
-          | "dot"
-          | "dash"
-          | undefined,
+        ...(style && { style }),
+        ...(length && { length }),
       };
+    }
     case "Separator":
       return { type: "Separator" };
 
@@ -1561,10 +2045,30 @@ function convertTagToNode(
       return { type: "Clause", children };
     case "Subclause":
       return { type: "Subclause", children };
+    case "Subsubclause":
+      return { type: "Subsubclause", children };
     case "Definition":
       return { type: "Definition", children };
+    case "DefinitionEnOnly":
+      return { type: "DefinitionEnOnly", children };
+    case "DefinitionFrOnly":
+      return { type: "DefinitionFrOnly", children };
     case "Continued":
       return { type: "Continued", children };
+    case "ContinuedSubparagraph":
+      return { type: "ContinuedSubparagraph", children };
+    case "ContinuedClause":
+      return { type: "ContinuedClause", children };
+    case "ContinuedSubclause":
+      return { type: "ContinuedSubclause", children };
+    case "ContinuedFormulaParagraph":
+      return { type: "ContinuedFormulaParagraph", children };
+    case "ContinuedSectionSubsection":
+      return { type: "ContinuedSectionSubsection", children };
+    case "ContinuedParagraph":
+      return { type: "ContinuedParagraph", children };
+    case "ContinuedDefinition":
+      return { type: "ContinuedDefinition", children };
 
     // Lists
     case "List":
@@ -1681,11 +2185,36 @@ function convertTagToNode(
     case "LeaderRightJustified":
       return { type: "LeaderRightJustified", children };
 
-    // Skip metadata elements that are handled separately
+    // Amending and container elements
+    case "SectionPiece":
+      return { type: "SectionPiece", children };
+    case "AmendedText":
+      return { type: "AmendedText", children };
+    case "AmendedContent":
+      return { type: "AmendedContent", children };
+    case "Reserved":
+      return { type: "Reserved", children };
+    case "Order":
+      return { type: "Order", children };
+    case "Recommendation":
+      return { type: "Recommendation", children };
+    case "Notice":
+      return { type: "Notice", children };
+
+    // Metadata elements (rendered separately in UI as expandable sections)
     case "MarginalNote":
+      return { type: "MarginalNote", children };
     case "HistoricalNote":
+      return { type: "HistoricalNote", children };
     case "HistoricalNoteSubItem":
-      return null;
+      return { type: "HistoricalNoteSubItem", children };
+    case "Footnote":
+      return {
+        type: "Footnote",
+        id: attrs["@_id"] as string | undefined,
+        placement: attrs["@_placement"] as string | undefined,
+        children,
+      };
 
     default:
       // For unhandled elements, preserve with Unknown type (even if no children)
@@ -1748,8 +2277,8 @@ function extractEntryAttrs(
  * Result from definition text extraction.
  */
 export type DefinitionText = {
-  /** Justice Canada's unique element ID (lims:id attribute) */
-  limsId: string;
+  /** Document position for position-based joining */
+  definitionOrder: number;
   /** Full definition text with proper document order */
   definitionText: string;
 };
@@ -1758,7 +2287,7 @@ export type DefinitionText = {
  * Extract definition text for all Definition elements from pre-parsed XML data.
  * Uses preserveOrder=true to maintain correct text order in mixed content.
  *
- * Returns definitions with their limsId for joining with database records.
+ * Returns definitions with their position for joining with database records.
  *
  * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
  */
@@ -1766,7 +2295,8 @@ export function extractDefinitionTexts(
   parsed: PreservedOrderData
 ): DefinitionText[] {
   const results: DefinitionText[] = [];
-  walkForDefinitions(parsed, results);
+  const counter = { definitionOrder: 0 };
+  walkForDefinitions(parsed, results, counter);
 
   return results;
 }
@@ -1774,7 +2304,11 @@ export function extractDefinitionTexts(
 /**
  * Walk preserved-order structure to find Definition elements and extract text.
  */
-function walkForDefinitions(items: unknown[], results: DefinitionText[]): void {
+function walkForDefinitions(
+  items: unknown[],
+  results: DefinitionText[],
+  counter: { definitionOrder: number }
+): void {
   if (!Array.isArray(items)) {
     return;
   }
@@ -1794,18 +2328,17 @@ function walkForDefinitions(items: unknown[], results: DefinitionText[]): void {
     const children = Array.isArray(value) ? value : [];
 
     if (tag === "Definition") {
-      const attrs = obj[":@"] as Record<string, unknown> | undefined;
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      counter.definitionOrder++;
+      // Extract text from all children, preserving order
+      const definitionText = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (limsId) {
-        // Extract text from all children, preserving order
-        const definitionText = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (definitionText) {
-          results.push({ limsId, definitionText });
-        }
+      if (definitionText) {
+        results.push({
+          definitionOrder: counter.definitionOrder,
+          definitionText,
+        });
       }
       // Don't recurse into Definition - its content is already captured
       continue;
@@ -1813,7 +2346,7 @@ function walkForDefinitions(items: unknown[], results: DefinitionText[]): void {
 
     // Recurse into container elements
     if (children.length > 0) {
-      walkForDefinitions(children, results);
+      walkForDefinitions(children, results, counter);
     }
   }
 }
@@ -1826,17 +2359,19 @@ function walkForDefinitions(items: unknown[], results: DefinitionText[]): void {
  * Result from section content extraction.
  */
 export type SectionContent = {
-  /** Justice Canada's unique element ID (lims:id attribute) */
-  limsId: string;
+  /** Document position for position-based joining */
+  sectionOrder: number;
   /** Full section content as plain text with proper document order */
   content: string;
+  /** Marginal note (side heading) with proper document order */
+  marginalNote?: string;
 };
 
 /**
  * Extract plain text content for all Section elements from pre-parsed XML data.
  * Uses preserveOrder=true to maintain correct text order in mixed content.
  *
- * Returns sections with their limsId for joining with database records.
+ * Returns sections with their position for joining with database records.
  *
  * @param parsed - Pre-parsed XML data from parseFileWithPreservedOrder()
  */
@@ -1844,7 +2379,8 @@ export function extractSectionContents(
   parsed: PreservedOrderData
 ): SectionContent[] {
   const results: SectionContent[] = [];
-  walkForSectionContent(parsed, results);
+  const counter = { sectionOrder: 0 };
+  walkForSectionContent(parsed, results, counter);
 
   return results;
 }
@@ -1854,7 +2390,8 @@ export function extractSectionContents(
  */
 function walkForSectionContent(
   items: unknown[],
-  results: SectionContent[]
+  results: SectionContent[],
+  counter: { sectionOrder: number }
 ): void {
   if (!Array.isArray(items)) {
     return;
@@ -1876,18 +2413,14 @@ function walkForSectionContent(
 
     // Handle Section elements (acts)
     if (tag === "Section") {
-      const attrs = obj[":@"] as Record<string, unknown> | undefined;
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      counter.sectionOrder++;
+      // Extract text from all children, preserving order
+      const content = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (limsId) {
-        // Extract text from all children, preserving order
-        const content = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (content) {
-          results.push({ limsId, content });
-        }
+      if (content) {
+        results.push({ sectionOrder: counter.sectionOrder, content });
       }
       // Don't recurse into Section - its content is already captured
       continue;
@@ -1895,47 +2428,38 @@ function walkForSectionContent(
 
     // Handle Provision elements (regulations)
     if (tag === "Provision") {
-      const attrs = obj[":@"] as Record<string, unknown> | undefined;
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      counter.sectionOrder++;
+      const content = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (limsId) {
-        const content = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (content) {
-          results.push({ limsId, content });
-        }
+      if (content) {
+        results.push({ sectionOrder: counter.sectionOrder, content });
       }
       continue;
     }
 
-    // Handle Enacts element (enacting clause)
+    // Handle Enacts element (enacting clause) - uses sectionOrder 0
     if (tag === "Enacts") {
-      const attrs = obj[":@"] as Record<string, unknown> | undefined;
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      const content = extractTextFromPreserved(children)
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (limsId) {
-        const content = extractTextFromPreserved(children)
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (content) {
-          results.push({ limsId, content });
-        }
+      if (content) {
+        results.push({ sectionOrder: 0, content });
       }
       continue;
     }
 
     // Handle Schedule elements - extract Item content
     if (tag === "Schedule") {
-      walkScheduleForContent(children, results);
+      walkScheduleForContent(children, results, counter);
       continue;
     }
 
     // Recurse into container elements
     if (children.length > 0) {
-      walkForSectionContent(children, results);
+      walkForSectionContent(children, results, counter);
     }
   }
 }
@@ -1945,7 +2469,8 @@ function walkForSectionContent(
  */
 function walkScheduleForContent(
   children: unknown[],
-  results: SectionContent[]
+  results: SectionContent[],
+  counter: { sectionOrder: number }
 ): void {
   for (const child of children) {
     if (!child || typeof child !== "object") {
@@ -1962,50 +2487,38 @@ function walkScheduleForContent(
     const tagChildren = Array.isArray(value) ? value : [];
 
     if (tag === "Item") {
-      const attrs = obj[":@"] as Record<string, unknown> | undefined;
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      counter.sectionOrder++;
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (content) {
-          results.push({ limsId, content });
-        }
+      if (content) {
+        results.push({ sectionOrder: counter.sectionOrder, content });
       }
       // Process nested items
-      walkScheduleForContent(tagChildren, results);
+      walkScheduleForContent(tagChildren, results, counter);
     } else if (tag === "FormGroup" || tag === "TableGroup") {
-      const attrs = obj[":@"] as Record<string, unknown> | undefined;
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      counter.sectionOrder++;
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (content) {
-          results.push({ limsId, content });
-        }
+      if (content) {
+        results.push({ sectionOrder: counter.sectionOrder, content });
       }
     } else if (tag === "Provision") {
       // DocumentInternal provisions
-      const attrs = obj[":@"] as Record<string, unknown> | undefined;
-      const limsId = attrs?.["@_lims:id"] as string | undefined;
+      counter.sectionOrder++;
+      const content = extractTextFromPreserved(tagChildren)
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (limsId) {
-        const content = extractTextFromPreserved(tagChildren)
-          .replace(/\s+/g, " ")
-          .trim();
-
-        if (content) {
-          results.push({ limsId, content });
-        }
+      if (content) {
+        results.push({ sectionOrder: counter.sectionOrder, content });
       }
     } else if (tagChildren.length > 0) {
       // Recurse into containers (List, DocumentInternal, Group, etc.)
-      walkScheduleForContent(tagChildren, results);
+      walkScheduleForContent(tagChildren, results, counter);
     }
   }
 }

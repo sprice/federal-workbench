@@ -1,10 +1,12 @@
 import "server-only";
 
 import { and, asc, eq, gte, lte, or, sql } from "drizzle-orm";
+import { unstable_cache } from "next/cache";
 import type { ContentNode } from "@/lib/legislation/types";
 import { getDb } from "../connection";
 import type {
   EnablingAuthorityInfo,
+  EnablingAuthorityOrder,
   FootnoteInfo,
   HistoricalNoteItem,
 } from "./schema";
@@ -275,6 +277,7 @@ export type RegulationMetadata = {
   enablingActId: string | null;
   enablingActTitle: string | null;
   enablingAuthorities: EnablingAuthorityInfo[] | null;
+  enablingAuthorityOrder: EnablingAuthorityOrder | null;
   language: string;
 };
 
@@ -319,6 +322,7 @@ export async function getRegulationMetadata({
       enablingActId: regulations.enablingActId,
       enablingActTitle: regulations.enablingActTitle,
       enablingAuthorities: regulations.enablingAuthorities,
+      enablingAuthorityOrder: regulations.enablingAuthorityOrder,
       language: regulations.language,
     })
     .from(regulations)
@@ -349,6 +353,7 @@ export async function getRegulationMetadata({
         enablingActId: regulations.enablingActId,
         enablingActTitle: regulations.enablingActTitle,
         enablingAuthorities: regulations.enablingAuthorities,
+        enablingAuthorityOrder: regulations.enablingAuthorityOrder,
         language: regulations.language,
       })
       .from(regulations)
@@ -501,8 +506,9 @@ export type DefinedTermItem = {
 };
 
 // Pattern for validating section/part labels (alphanumeric with dots, hyphens, spaces)
-// Examples: "1", "1.1", "Part I", "Part XVI", "Division 1"
-const SECTION_LABEL_REGEX = /^[\w\s.-]+$/;
+// Examples: "1", "1.1", "Part I", "Part XVI", "Division 1", "Part V — Airworthiness"
+// Includes em-dash (—) and en-dash (–) common in legislation typography
+const SECTION_LABEL_REGEX = /^[\w\s.\-–—]+$/;
 
 /**
  * Validate section or part label format.
@@ -588,3 +594,114 @@ export async function getDefinedTermsForSection(params: {
 
   return rows;
 }
+
+// ============================================================================
+// LEGISLATION STATISTICS QUERIES
+// ============================================================================
+
+export type ActWithRegulationCount = {
+  actId: string;
+  title: string;
+  runningHead: string | null;
+  status: string;
+  inForceDate: string | null;
+  consolidatedNumber: string | null;
+  sectionCount: number;
+  regulationCount: number;
+};
+
+export type LegislationStats = {
+  acts: ActWithRegulationCount[];
+  totalActs: number;
+  totalRegulations: number;
+  totalSections: number;
+};
+
+/**
+ * Get legislation statistics including acts with their regulation counts.
+ * Used for the status page to show available legislation.
+ * Cached for 1 hour to avoid blocking route renders.
+ */
+export const getLegislationStats = unstable_cache(
+  async (): Promise<LegislationStats> => {
+    const db = getDb();
+
+    // Get all English acts with section and regulation counts
+    const actsData = await db
+      .select({
+        actId: acts.actId,
+        title: acts.title,
+        runningHead: acts.runningHead,
+        status: acts.status,
+        inForceDate: acts.inForceDate,
+        consolidatedNumber: acts.consolidatedNumber,
+      })
+      .from(acts)
+      .where(eq(acts.language, "en"))
+      .orderBy(asc(acts.title));
+
+    // Get section counts per act
+    const sectionCounts = await db
+      .select({
+        actId: sections.actId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(sections)
+      .where(
+        and(eq(sections.language, "en"), sql`${sections.actId} IS NOT NULL`)
+      )
+      .groupBy(sections.actId);
+
+    // Get regulation counts per enabling act
+    const regulationCounts = await db
+      .select({
+        enablingActId: regulations.enablingActId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(regulations)
+      .where(
+        and(
+          eq(regulations.language, "en"),
+          sql`${regulations.enablingActId} IS NOT NULL`
+        )
+      )
+      .groupBy(regulations.enablingActId);
+
+    // Create lookup maps
+    const sectionCountMap = new Map(
+      sectionCounts.map((s) => [s.actId, s.count])
+    );
+    const regulationCountMap = new Map(
+      regulationCounts.map((r) => [r.enablingActId, r.count])
+    );
+
+    // Combine data
+    const actsWithCounts: ActWithRegulationCount[] = actsData.map((act) => ({
+      actId: act.actId,
+      title: act.title,
+      runningHead: act.runningHead,
+      status: act.status,
+      inForceDate: act.inForceDate,
+      consolidatedNumber: act.consolidatedNumber,
+      sectionCount: sectionCountMap.get(act.actId) ?? 0,
+      regulationCount: regulationCountMap.get(act.actId) ?? 0,
+    }));
+
+    // Calculate totals
+    const totalActs = actsWithCounts.length;
+    const totalRegulations = regulationCounts.reduce(
+      (sum, r) => sum + r.count,
+      0
+    );
+    const totalSections = sectionCounts.reduce((sum, s) => sum + s.count, 0);
+
+    return {
+      acts: actsWithCounts,
+      totalActs,
+      totalRegulations,
+      totalSections,
+    };
+  },
+  ["legislation-stats"],
+  { revalidate: 3600 } // Cache for 1 hour
+);

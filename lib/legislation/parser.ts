@@ -21,6 +21,7 @@ import { parseDate, parseDateElement } from "./utils/dates";
 import {
   extractBillHistory,
   extractEnablingAuthorities,
+  extractEnablingAuthorityOrder,
   extractEnactingClause,
   extractPreamble,
   extractPublicationItems,
@@ -252,23 +253,26 @@ export function parseActXml(
     allSections.unshift(enactsSection);
   }
 
-  // Join extracted content by limsId to populate contentTree, hierarchyPath, and corrected content
+  // Join extracted content by position to populate contentTree, hierarchyPath, and corrected content
   if (extractedContent) {
-    // Build lookup maps for efficient joining
+    // Build lookup maps for efficient joining - keyed by document position, not limsId
     const contentTreeMap = new Map(
       extractedContent.contentTrees
         .filter((ct) => ct.limsId)
         .map((ct) => [ct.limsId, ct])
     );
-    const sectionContentMap = new Map(
-      extractedContent.sectionContents.map((sc) => [sc.limsId, sc])
+    // Section content map keyed by sectionOrder (position in document)
+    const sectionContentByOrder = new Map(
+      extractedContent.sectionContents.map((sc) => [sc.sectionOrder, sc])
     );
-    const definitionTextMap = new Map(
-      extractedContent.definitionTexts.map((dt) => [dt.limsId, dt])
+    // Definition text map keyed by definitionOrder (position in document)
+    const definitionTextByOrder = new Map(
+      extractedContent.definitionTexts.map((dt) => [dt.definitionOrder, dt])
     );
 
-    // Join sections by limsId
+    // Join ALL sections by sectionOrder (position-based, not limsId-gated)
     for (const section of allSections) {
+      // Content tree still uses limsId for now (hierarchy path)
       const limsId = section.limsMetadata?.id;
       if (limsId) {
         const contentTree = contentTreeMap.get(limsId);
@@ -276,18 +280,21 @@ export function parseActXml(
           section.contentTree = contentTree.contentTree;
           section.hierarchyPath = contentTree.hierarchyPath;
         }
-        const sectionContent = sectionContentMap.get(limsId);
-        if (sectionContent) {
-          section.content = sectionContent.content;
+      }
+      // Section content uses position-based joining
+      const sectionContent = sectionContentByOrder.get(section.sectionOrder);
+      if (sectionContent) {
+        section.content = sectionContent.content;
+        if (sectionContent.marginalNote) {
+          section.marginalNote = sectionContent.marginalNote;
         }
       }
     }
 
-    // Join defined terms by limsId
+    // Join ALL defined terms by definitionOrder (position-based)
     for (const term of definedTerms) {
-      const limsId = term.limsMetadata?.id;
-      if (limsId) {
-        const definitionText = definitionTextMap.get(limsId);
+      if (term.definitionOrder !== undefined) {
+        const definitionText = definitionTextByOrder.get(term.definitionOrder);
         if (definitionText) {
           term.definition = definitionText.definitionText;
         }
@@ -379,6 +386,16 @@ export function parseRegulationXml(
   // Extract regulation maker/order info
   const regulationMakerOrder = extractRegulationMakerOrder(identification);
 
+  // Extract enabling authority order (text, footnotes, limsMetadata from standard parse)
+  const baseEnablingAuthorityOrder = extractEnablingAuthorityOrder(regulation);
+  // Merge with contentTree from preserved-order extraction for proper rendering
+  const enablingAuthorityOrder = baseEnablingAuthorityOrder
+    ? {
+        ...baseEnablingAuthorityOrder,
+        contentTree: extractedContent?.enablingAuthorityOrder?.contentTree,
+      }
+    : undefined;
+
   // Extract recent amendments
   const recentAmendments = extractRecentAmendments(regulation);
 
@@ -417,6 +434,7 @@ export function parseRegulationXml(
     lastAmendedDate,
     limsMetadata,
     regulationMakerOrder,
+    enablingAuthorityOrder,
     recentAmendments,
     relatedProvisions,
     treaties,
@@ -435,8 +453,8 @@ export function parseRegulationXml(
       : [regulation.Schedule]
     : [];
 
-  // Create a combined element that includes Body content, root-level Schedules,
-  // and Order elements (which contain regulatory authority text)
+  // Create a combined element that includes Body content and root-level Schedules
+  // Note: Order elements (enabling authority text) are extracted as metadata, not sections
   const bodySchedules = body.Schedule
     ? Array.isArray(body.Schedule)
       ? body.Schedule
@@ -447,7 +465,6 @@ export function parseRegulationXml(
   const combinedBody = {
     ...body,
     ...(allSchedules.length > 0 ? { Schedule: allSchedules } : {}),
-    ...(regulation.Order ? { Order: regulation.Order } : {}),
   };
 
   const { sections, definedTerms, crossReferences } = parseSections({
@@ -456,23 +473,26 @@ export function parseRegulationXml(
     regulationId,
   });
 
-  // Join extracted content by limsId to populate contentTree, hierarchyPath, and corrected content
+  // Join extracted content by position to populate contentTree, hierarchyPath, and corrected content
   if (extractedContent) {
-    // Build lookup maps for efficient joining
+    // Build lookup maps for efficient joining - keyed by document position, not limsId
     const contentTreeMap = new Map(
       extractedContent.contentTrees
         .filter((ct) => ct.limsId)
         .map((ct) => [ct.limsId, ct])
     );
-    const sectionContentMap = new Map(
-      extractedContent.sectionContents.map((sc) => [sc.limsId, sc])
+    // Section content map keyed by sectionOrder (position in document)
+    const sectionContentByOrder = new Map(
+      extractedContent.sectionContents.map((sc) => [sc.sectionOrder, sc])
     );
-    const definitionTextMap = new Map(
-      extractedContent.definitionTexts.map((dt) => [dt.limsId, dt])
+    // Definition text map keyed by definitionOrder (position in document)
+    const definitionTextByOrder = new Map(
+      extractedContent.definitionTexts.map((dt) => [dt.definitionOrder, dt])
     );
 
-    // Join sections by limsId
+    // Join ALL sections by sectionOrder (position-based, not limsId-gated)
     for (const section of sections) {
+      // Content tree still uses limsId for now (hierarchy path)
       const limsId = section.limsMetadata?.id;
       if (limsId) {
         const contentTree = contentTreeMap.get(limsId);
@@ -480,18 +500,21 @@ export function parseRegulationXml(
           section.contentTree = contentTree.contentTree;
           section.hierarchyPath = contentTree.hierarchyPath;
         }
-        const sectionContent = sectionContentMap.get(limsId);
-        if (sectionContent) {
-          section.content = sectionContent.content;
+      }
+      // Section content uses position-based joining
+      const sectionContent = sectionContentByOrder.get(section.sectionOrder);
+      if (sectionContent) {
+        section.content = sectionContent.content;
+        if (sectionContent.marginalNote) {
+          section.marginalNote = sectionContent.marginalNote;
         }
       }
     }
 
-    // Join defined terms by limsId
+    // Join ALL defined terms by definitionOrder (position-based)
     for (const term of definedTerms) {
-      const limsId = term.limsMetadata?.id;
-      if (limsId) {
-        const definitionText = definitionTextMap.get(limsId);
+      if (term.definitionOrder !== undefined) {
+        const definitionText = definitionTextByOrder.get(term.definitionOrder);
         if (definitionText) {
           term.definition = definitionText.definitionText;
         }

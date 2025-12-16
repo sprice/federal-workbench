@@ -5,7 +5,7 @@
  * used across Heading, GroupHeading, ScheduleFormHeading, etc.
  */
 
-import { extractTextContent } from "./text";
+import { extractTextContentPreserved as extractTextContent } from "./text";
 
 /**
  * Extract Label and TitleText from a heading-like element.

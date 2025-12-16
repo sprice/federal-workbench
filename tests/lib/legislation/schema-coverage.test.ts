@@ -348,43 +348,67 @@ test.describe("XSLT/DTD Schema Coverage", () => {
     }
   });
 
-  test("documents known schema gaps for future fixes", () => {
+  test("amending and container elements are handled", () => {
     const allHandlers = getAllHandlers();
-    const xsltTemplates = getXsltTemplates();
-    const dtdElements = getDtdElements();
 
-    // Known gaps that exist in XSLT/DTD but aren't fully handled
-    const knownGaps = [
+    // Elements added for schedule containers and amending content
+    const amendingElements = [
       "SectionPiece",
       "Order",
       "Recommendation",
       "Notice",
       "Reserved",
-      "ExplanatoryNote",
       "AmendedText",
     ];
 
-    const confirmedGaps: string[] = [];
-
-    for (const gap of knownGaps) {
-      const inXslt = xsltTemplates.has(gap);
-      const inDtd = dtdElements.has(gap);
-      const handled = allHandlers.has(gap);
-
-      if ((inXslt || inDtd) && !handled) {
-        confirmedGaps.push(gap);
+    const missing: string[] = [];
+    for (const element of amendingElements) {
+      if (!allHandlers.has(element)) {
+        missing.push(element);
       }
     }
 
-    // Log for visibility
-    if (confirmedGaps.length > 0) {
-      console.log(
-        `Known schema gaps to fix in future: ${confirmedGaps.join(", ")}`
-      );
+    expect(
+      missing,
+      `Missing amending/container element handlers: ${missing.join(", ")}`
+    ).toHaveLength(0);
+  });
+
+  test("no critical schema gaps exist", () => {
+    const allHandlers = getAllHandlers();
+    const xsltTemplates = getXsltTemplates();
+    const dtdElements = getDtdElements();
+
+    // Elements that should definitely be handled (critical for legislation parsing)
+    const criticalElements = [
+      "Section",
+      "Subsection",
+      "Paragraph",
+      "Text",
+      "Label",
+      "Definition",
+      "Table",
+      "Formula",
+      "List",
+      "SectionPiece",
+      "AmendedText",
+    ];
+
+    const gaps: string[] = [];
+
+    for (const element of criticalElements) {
+      const inSchema = xsltTemplates.has(element) || dtdElements.has(element);
+      const handled = allHandlers.has(element);
+
+      // Only flag as gap if in schema but not handled
+      if (inSchema && !handled) {
+        gaps.push(element);
+      }
     }
 
-    // This test passes - it documents gaps without failing
-    expect(true).toBe(true);
+    expect(gaps, `Critical schema gaps found: ${gaps.join(", ")}`).toHaveLength(
+      0
+    );
   });
 
   test("XSLT file exists and is parseable", () => {
